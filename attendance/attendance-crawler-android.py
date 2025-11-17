@@ -1,0 +1,482 @@
+import argparse
+import hashlib
+import json
+import logging
+import os
+import re
+import time
+from datetime import datetime
+
+import getpass
+import pandas as pd
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from webdriver_manager.chrome import ChromeDriverManager
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+class NIAAttendanceMonitor:
+    def __init__(self, headless=True, driver_path=None):
+        self.base_url = "https://attendance.caraga.nia.gov.ph"
+        self.auth_url = "https://accounts.nia.gov.ph/Account/Login"
+        self.headless = headless
+        self.driver_path = driver_path
+    
+    def _create_driver(self):
+        options = Options()
+        if self.headless:
+            options.add_argument("--headless=new")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--log-level=3")
+        service = Service(self.driver_path or ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        driver.set_page_load_timeout(60)
+        return driver
+
+    def _login_with_selenium(self, driver, employee_id, password):
+        logging.debug("Opening login page with Selenium...")
+        driver.get(f"{self.auth_url}?ReturnUrl={self.base_url}/")
+        wait = WebDriverWait(driver, 30)
+
+        employee_input = wait.until(EC.presence_of_element_located((By.NAME, "EmployeeID")))
+        password_input = wait.until(EC.presence_of_element_located((By.NAME, "Password")))
+
+        employee_input.clear()
+        employee_input.send_keys(employee_id)
+        password_input.clear()
+        password_input.send_keys(password)
+
+        # Try to click the submit button, fall back to pressing Enter
+        try:
+            submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+            submit_btn.click()
+        except Exception:
+            password_input.submit()
+
+        wait.until(EC.url_contains(self.base_url))
+        logging.info("✓ Login successful via Selenium")
+
+    def _load_attendance_html(self, driver):
+        logging.debug("Navigating to attendance page...")
+        driver.get(f"{self.base_url}/Attendance")
+        wait = WebDriverWait(driver, 30)
+        wait.until(EC.presence_of_element_located((By.ID, "DataTables_Table_0")))
+
+        # Wait for rows to be populated (if table loads via JS)
+        try:
+            wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "#DataTables_Table_0 tbody tr")) > 0)
+        except TimeoutException:
+            logging.warning("Attendance table loaded but contains no rows (yet). Proceeding with current content.")
+
+        html_content = driver.page_source
+        logging.debug("Captured attendance page HTML (%s chars)", len(html_content))
+        return html_content
+    
+    def get_attendance_data(self, employee_id, password, driver=None, reuse_driver=False):
+        """Use Selenium to log in and extract attendance data"""
+        created_driver = driver is None
+        if created_driver:
+            try:
+                driver = self._create_driver()
+            except WebDriverException as e:
+                logging.error(f"Unable to start Selenium driver: {e}")
+                return None, None
+            try:
+                self._login_with_selenium(driver, employee_id, password)
+            except Exception as e:
+                logging.error(f"Login failed during Selenium setup: {e}")
+                driver.quit()
+                return None, None
+
+        try:
+            html_content = self._load_attendance_html(driver)
+            attendance_data = self.parse_attendance_html(html_content)
+
+            if attendance_data and attendance_data['records'] and not reuse_driver:
+                self.save_as_csv(attendance_data['table_headers'], attendance_data['records'])
+
+            return attendance_data, driver
+        except TimeoutException as e:
+            logging.error(f"Selenium timed out while loading the page: {e}")
+            return None, driver
+        except Exception as e:
+            logging.error(f"Error fetching attendance via Selenium: {e}")
+            return None, driver
+        finally:
+            if created_driver and not reuse_driver and driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+    
+    def parse_attendance_html(self, html_content):
+        """Parse attendance table HTML (supports JS-rendered content)"""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        table = soup.find('table', {'id': 'DataTables_Table_0'})
+        if not table:
+            logging.error("No attendance table found on page")
+            return None
+
+        # Extract table headers
+        headers = []
+        thead = table.find('thead')
+        if thead:
+            header_row = thead.find('tr')
+            if header_row:
+                headers = [th.get_text(strip=True) for th in header_row.find_all('th')]
+
+        logging.debug("Found table headers: %s", headers)
+
+        # Extract table rows
+        rows = []
+        table_body = table.find('tbody')
+        if table_body:
+            for row in table_body.find_all('tr'):
+                cells = row.find_all('td')
+                if not cells:
+                    continue
+                row_data = []
+                for cell in cells:
+                    if 'sorting_1' in cell.get('class', []):
+                        date_parts = [
+                            span.get_text(strip=True)
+                            for span in cell.find_all('span')
+                            if span.get_text(strip=True)
+                        ]
+                        row_data.append(' '.join(date_parts) if date_parts else cell.get_text(strip=True))
+                    else:
+                        row_data.append(cell.get_text(strip=True))
+                rows.append(row_data)
+
+        logging.debug("Attendance rows parsed: %s", len(rows))
+
+        generated_time = "Unknown"
+        tfoot = table.find('tfoot')
+        if tfoot:
+            tfoot_cells = tfoot.find_all('th')
+            if len(tfoot_cells) >= 2:
+                generated_time = tfoot_cells[1].get_text(strip=True)
+
+        total_records = "Unknown"
+        caption = table.find('caption')
+        if caption:
+            caption_text = caption.get_text(strip=True)
+            match = re.search(r'\((\d+)\)', caption_text)
+            if match:
+                total_records = match.group(1)
+
+        return {
+            'timestamp': datetime.now().isoformat(),
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            'table_headers': headers,
+            'records': rows,
+            'records_found': len(rows),
+            'total_records_caption': total_records,
+            'report_generated_time': generated_time
+        }
+
+    def save_as_csv(self, headers, rows):
+        """Save attendance data as CSV file"""
+        try:
+            if not rows:
+                logging.warning("No data to save as CSV")
+                return
+            
+            # Create DataFrame
+            df = pd.DataFrame(rows, columns=headers)
+            
+            # Generate filename with current date
+            filename = f"attendance_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+            
+            # Save to CSV
+            df.to_csv(filename, index=False, encoding='utf-8')
+            logging.info("✓ Attendance data saved as %s", filename)
+            
+            logging.debug("Recent attendance records preview:")
+            print(df.head(10).to_string(index=False))
+            
+            # Show summary
+            logging.debug("Total records: %s", len(rows))
+            if 'Date Time' in df.columns:
+                logging.debug("Date range: %s to %s", df['Date Time'].min(), df['Date Time'].max())
+            
+        except Exception as e:
+            logging.error(f"Error saving CSV: {e}")
+    
+    def analyze_attendance_patterns(self, attendance_data, employee_id):
+        """Analyze attendance patterns and detect potential issues"""
+        try:
+            if not attendance_data or 'records' not in attendance_data:
+                logging.warning("No attendance data to analyze")
+                return None
+            
+            headers = attendance_data['table_headers']
+            records = attendance_data['records']
+            
+            if not records:
+                logging.warning(f"No records found")
+                return None
+            
+            # Find column indices
+            date_time_idx = headers.index('Date Time') if 'Date Time' in headers else 1
+            emp_id_idx = headers.index('Employee ID') if 'Employee ID' in headers else 4
+            
+            # Filter records for this employee
+            my_records = [record for record in records if len(record) > emp_id_idx and record[emp_id_idx] == employee_id]
+            
+            logging.debug("ATTENDANCE ANALYSIS FOR EMPLOYEE %s", employee_id)
+            logging.debug("Total records found: %s", len(my_records))
+            
+            if not my_records:
+                logging.warning(f"No matching records found for Employee ID: {employee_id}")
+                return None
+            
+            # Parse dates and analyze patterns
+            today = datetime.now().date()
+            today_records = []
+            
+            for record in my_records:
+                if len(record) > date_time_idx:
+                    date_str = record[date_time_idx]
+                    try:
+                        # Parse date string like "11/17/2025 12:59:09 PM"
+                        record_date = datetime.strptime(date_str, '%m/%d/%Y %I:%M:%S %p').date()
+                        if record_date == today:
+                            today_records.append(record)
+                    except ValueError as e:
+                        logging.debug(f"Date parsing error for '{date_str}': {e}")
+                        # Try alternative formats
+                        try:
+                            record_date = datetime.strptime(date_str, '%m/%d/%Y %I:%M %p').date()
+                            if record_date == today:
+                                today_records.append(record)
+                        except ValueError:
+                            pass
+            
+            logging.info("Records for today (%s): %s", today, len(today_records))
+            
+            # Show today's records
+            if today_records:
+                logging.info("Today's attendance:")
+                for record in today_records:
+                    time_in_record = record[date_time_idx] if len(record) > date_time_idx else "N/A"
+                    temp = record[2] if len(record) > 2 else "N/A"
+                    logging.info(f"  - {time_in_record} (Temp: {temp}°C)")
+                
+                # Check for potential issues
+                if len(today_records) < 2:
+                    logging.warning("⚠️  WARNING: Only one record today. Make sure you have both Time In and Time Out.")
+                elif len(today_records) % 2 != 0:
+                    logging.warning("⚠️  WARNING: Odd number of records today. Possible missing Time Out.")
+                else:
+                    logging.info("✓ Good: Even number of records today (likely both Time In and Time Out)")
+            else:
+                logging.info("No records found for today")
+            
+            return {
+                'employee_id': employee_id,
+                'total_records': len(my_records),
+                'today_records': len(today_records),
+                'today_details': today_records,
+                'analysis_timestamp': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logging.error(f"Error analyzing attendance: {e}")
+            return None
+    
+    def save_attendance_record(self, attendance_data):
+        """Save attendance data to a local JSON file"""
+        try:
+            filename = f"nia_attendance_backup_{datetime.now().strftime('%Y%m')}.json"
+            
+            # Load existing data or create new list
+            if os.path.exists(filename):
+                with open(filename, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            else:
+                data = []
+            
+            # Add new record
+            data.append(attendance_data)
+            
+            # Save back to file
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            
+            logging.info(f"✓ Attendance record saved to {filename}")
+            
+        except Exception as e:
+            logging.error(f"Error saving attendance record: {e}")
+    
+    def _hash_records(self, records):
+        hasher = hashlib.sha256()
+        for row in records:
+            line = "||".join(row)
+            hasher.update(line.encode('utf-8', errors='replace'))
+        return hasher.hexdigest()
+
+    def monitor_attendance(self, employee_id, password, interval_seconds=300, max_checks=None):
+        logging.info("Starting continuous monitoring (interval: %s seconds)", interval_seconds)
+        checks = 0
+        driver = None
+        last_hash = None
+
+        try:
+            attendance_data, driver = self.get_attendance_data(
+                employee_id,
+                password,
+                driver=None,
+                reuse_driver=True
+            )
+
+            if driver is None:
+                logging.error("Failed to initialize Selenium driver. Cannot start monitoring.")
+                return
+
+            while True:
+                if attendance_data:
+                    current_hash = self._hash_records(attendance_data['records'])
+                    if last_hash is None:
+                        last_hash = current_hash
+                        logging.info("Initial snapshot captured (%s records)", attendance_data['records_found'])
+                    elif current_hash != last_hash:
+                        logging.info("Detected change in attendance records!")
+                        last_hash = current_hash
+                        if attendance_data['records']:
+                            self.save_as_csv(attendance_data['table_headers'], attendance_data['records'])
+                        analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
+                        if analysis:
+                            self.save_attendance_record(analysis)
+                    else:
+                        logging.debug("No changes detected since last check.")
+                else:
+                    logging.warning("No attendance data retrieved this cycle.")
+
+                checks += 1
+                if max_checks and checks >= max_checks:
+                    logging.info("Reached max checks limit (%s). Stopping monitor.", max_checks)
+                    break
+
+                logging.debug("Sleeping for %s seconds before next check...", interval_seconds)
+                time.sleep(interval_seconds)
+
+                attendance_data, driver = self.get_attendance_data(
+                    employee_id,
+                    password,
+                    driver=driver,
+                    reuse_driver=True
+                )
+        except KeyboardInterrupt:
+            logging.info("Monitoring interrupted by user.")
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+    
+    def one_time_check(self, employee_id, password):
+        """Perform a single attendance check with analysis using Selenium"""
+        attendance_data, _ = self.get_attendance_data(employee_id, password)
+        if attendance_data:
+            analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
+            if analysis:
+                self.save_attendance_record(analysis)
+                return analysis
+            return attendance_data
+        return None
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NIA Attendance Monitor")
+    parser.add_argument(
+        '--mode',
+        choices=['once', 'monitor'],
+        help='Run once or continuously monitor (defaults to interactive prompt)'
+    )
+    parser.add_argument(
+        '--interval',
+        type=int,
+        default=300,
+        help='Monitoring interval in seconds (default: 300)'
+    )
+    parser.add_argument(
+        '--max-checks',
+        type=int,
+        help='Optional limit on number of monitoring cycles'
+    )
+    parser.add_argument(
+        '--show-browser',
+        action='store_true',
+        help='Show the browser window instead of headless mode'
+    )
+    parser.add_argument(
+        '--driver-path',
+        help='Path to ChromeDriver executable (optional)'
+    )
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Enable verbose (DEBUG) logging output'
+    )
+    args = parser.parse_args()
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    monitor = NIAAttendanceMonitor(headless=not args.show_browser, driver_path=args.driver_path)
+    
+    # Get credentials securely
+    employee_id = input("Enter your Employee ID: ")
+    password = getpass.getpass("Enter your Password: ")
+    
+    if args.mode:
+        choice = '1' if args.mode == 'once' else '2'
+    else:
+        print("\nChoose operation:")
+        print("1. One-time attendance check with analysis")
+        print("2. Start continuous monitoring")
+        choice = input("Enter choice (1 or 2): ").strip()
+    
+    if choice == "1":
+        result = monitor.one_time_check(employee_id, password)
+        if result:
+            print("\n" + "="*50)
+            print("CHECK COMPLETED SUCCESSFULLY!")
+            if 'today_records' in result:
+                print(f"Today's records: {result['today_records']}")
+                if result['today_records'] < 2:
+                    print("⚠️  REMINDER: Make sure you have both Time In and Time Out records")
+                else:
+                    print("✓ Good attendance records for today")
+        else:
+            print("One-time check failed!")
+    
+    elif choice == "2":
+        monitor.monitor_attendance(
+            employee_id,
+            password,
+            interval_seconds=args.interval,
+            max_checks=args.max_checks
+        )
+    
+    else:
+        print("Invalid choice")
+
+if __name__ == "_main_":
+    main()
