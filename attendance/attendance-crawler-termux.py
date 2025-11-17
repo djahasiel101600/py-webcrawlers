@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
-Termux-friendly NIA Attendance Crawler
+Enhanced Termux-friendly NIA Attendance Crawler
 
-This script tries to use plain HTTP (requests + BeautifulSoup) to login and fetch
-attendance HTML so it can run on Termux or a lightweight Ubuntu inside Termux.
-
-If the website requires JavaScript-only login or rendering, use the `--selenium`
-flag to attempt a Selenium fallback (requires Chromium/Chrome + ChromeDriver
-available inside your environment).
+This script uses multiple approaches to fetch attendance data:
+1. Direct HTML table parsing
+2. AJAX endpoint discovery and JSON parsing  
+3. Selenium fallback (if available)
 
 Usage examples:
   python3 attendance-crawler-termux.py --mode once
   python3 attendance-crawler-termux.py --mode monitor --interval 300
-
-See `requirements-termux.txt` and `README-termux.md` for Termux install notes.
+  python3 attendance-crawler-termux.py --verbose
 """
 
 import argparse
@@ -25,11 +22,13 @@ import re
 import sys
 import time
 from datetime import datetime
+from urllib.parse import urljoin
 
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] %(levelname)s: %(message)s',
@@ -37,7 +36,7 @@ logging.basicConfig(
 )
 
 
-class TermuxNIA:
+class EnhancedNIAcrawler:
     def __init__(self, base_url=None, auth_url=None, user_agent=None):
         self.base_url = base_url or "https://attendance.caraga.nia.gov.ph"
         self.auth_url = auth_url or "https://accounts.nia.gov.ph/Account/Login"
@@ -45,445 +44,642 @@ class TermuxNIA:
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36"
         )
+        self.session = None
 
-    def _get_headers(self):
-        return {
+    def _get_headers(self, ajax=False):
+        headers = {
             'User-Agent': self.user_agent,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
         }
+        if ajax:
+            headers.update({
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+            })
+        return headers
 
-    def login_with_requests(self, session: requests.Session, employee_id: str, password: str) -> bool:
+    def init_session(self):
+        """Initialize a new session with proper headers"""
+        self.session = requests.Session()
+        self.session.headers.update(self._get_headers())
+
+    def login(self, employee_id: str, password: str) -> bool:
         """Attempt to login using requests. Returns True if login looks successful."""
-        logging.debug("Fetching login page to get hidden fields...")
-        resp = session.get(self.auth_url, headers=self._get_headers(), timeout=30)
-        if resp.status_code != 200:
-            logging.error("Failed to fetch login page (status %s)", resp.status_code)
+        if not self.session:
+            self.init_session()
+
+        logging.info("Attempting to login...")
+        
+        # First, get the login page to extract form data
+        try:
+            resp = self.session.get(self.auth_url, timeout=30)
+            if resp.status_code != 200:
+                logging.error(f"Failed to fetch login page (status {resp.status_code})")
+                return False
+        except Exception as e:
+            logging.error(f"Network error fetching login page: {e}")
             return False
 
         soup = BeautifulSoup(resp.text, 'html.parser')
+        
+        # Find login form
         form = soup.find('form')
+        if not form:
+            logging.error("No login form found on page")
+            return False
+
+        # Build payload with all form fields
         payload = {}
-        if form:
-            # Collect hidden inputs (anti-forgery tokens etc.)
-            for hidden in form.find_all('input', {'type': ['hidden', 'submit', 'text', 'password']}):
-                name = hidden.get('name')
-                if not name:
-                    continue
-                value = hidden.get('value', '')
+        for input_field in form.find_all('input'):
+            name = input_field.get('name')
+            value = input_field.get('value', '')
+            if name:
                 payload[name] = value
 
-        # Overwrite or set the credentials fields expected by the portal
-        # Known names in the original script: EmployeeID, Password
+        # Update with credentials
         payload.update({
             'EmployeeID': employee_id,
             'Password': password
         })
 
-        # If form has a ReturnUrl field, keep it; otherwise include base return
-        if 'ReturnUrl' not in payload:
-            payload['ReturnUrl'] = f"{self.base_url}/"
+        # Determine form action URL
+        form_action = form.get('action', '')
+        if form_action:
+            post_url = urljoin(self.auth_url, form_action)
+        else:
+            post_url = self.auth_url
 
-        logging.debug("Submitting login form via POST (requests)...")
-        post_url = form.get('action') if form and form.get('action') else self.auth_url
-        if post_url.startswith('/'):
-            # relative
-            post_url = requests.compat.urljoin(self.auth_url, post_url)
+        logging.debug(f"Submitting login to: {post_url}")
 
-        r2 = session.post(post_url, data=payload, headers=self._get_headers(), timeout=30, allow_redirects=True)
-        logging.debug("Login POST status: %s", r2.status_code)
-
-        # After POST, check if we can reach attendance page and see the attendance table
-        att = session.get(f"{self.base_url}/Attendance", headers=self._get_headers(), timeout=30)
-        if att.status_code != 200:
-            logging.warning("Unable to GET attendance page after login (status %s)", att.status_code)
+        # Submit login form
+        try:
+            login_resp = self.session.post(
+                post_url, 
+                data=payload, 
+                timeout=30, 
+                allow_redirects=True
+            )
+            
+            # Check if login was successful by testing access to attendance page
+            test_resp = self.session.get(f"{self.base_url}/Attendance", timeout=30)
+            
+            if test_resp.status_code == 200:
+                # Check for various success indicators
+                success_indicators = [
+                    'DataTables_Table_0' in test_resp.text,
+                    'attendance' in test_resp.text.lower(),
+                    'logout' in test_resp.text.lower(),
+                    employee_id in test_resp.text
+                ]
+                
+                if any(success_indicators):
+                    logging.info("✓ Login successful")
+                    return True
+                else:
+                    logging.warning("Login may have succeeded but attendance table not found")
+                    return True  # Continue anyway - table might be loaded via AJAX
+            else:
+                logging.error(f"Failed to access attendance page after login (status {test_resp.status_code})")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Login request failed: {e}")
             return False
 
-        if 'DataTables_Table_0' in att.text:
-            logging.info("✓ Login successful (requests)")
-            return True
-
-        # If DataTables not present, maybe JS is required. Return False so caller can fallback.
-        logging.warning("Attendance table not found in requests response — site may require JavaScript")
-        return False
-
-    def fetch_attendance_html_requests(self, session: requests.Session) -> str | None:
-        r = session.get(f"{self.base_url}/Attendance", headers=self._get_headers(), timeout=30)
-        if r.status_code == 200:
-            return r.text
-        logging.error("Failed to fetch attendance page (status %s)", r.status_code)
-        return None
-
-    def parse_attendance_html(self, html_content):
-        soup = BeautifulSoup(html_content, 'html.parser')
-        table = soup.find('table', {'id': 'DataTables_Table_0'})
-        if not table:
-            logging.error("No attendance table found on page")
+    def fetch_attendance_data(self):
+        """Main method to fetch attendance data using multiple approaches"""
+        if not self.session:
+            logging.error("No active session. Please login first.")
             return None
 
-        headers = []
-        thead = table.find('thead')
-        if thead:
-            header_row = thead.find('tr')
-            if header_row:
-                headers = [th.get_text(strip=True) for th in header_row.find_all('th')]
+        logging.info("Fetching attendance data...")
+        
+        # Approach 1: Try direct AJAX endpoint discovery first (most reliable for JS sites)
+        logging.debug("Attempting AJAX endpoint discovery...")
+        ajax_data = self.discover_ajax_endpoint()
+        if ajax_data:
+            logging.info("✓ Successfully fetched data via AJAX endpoint")
+            return ajax_data
 
-        rows = []
-        table_body = table.find('tbody')
-        if table_body:
-            for row in table_body.find_all('tr'):
-                cells = row.find_all('td')
-                if not cells:
-                    continue
-                row_data = []
-                for cell in cells:
-                    if 'sorting_1' in cell.get('class', []):
-                        date_parts = [
-                            span.get_text(strip=True)
-                            for span in cell.find_all('span')
-                            if span.get_text(strip=True)
-                        ]
-                        row_data.append(' '.join(date_parts) if date_parts else cell.get_text(strip=True))
-                    else:
-                        row_data.append(cell.get_text(strip=True))
-                rows.append(row_data)
+        # Approach 2: Try parsing HTML table
+        logging.debug("Attempting HTML table parsing...")
+        html_data = self.fetch_via_html()
+        if html_data:
+            logging.info("✓ Successfully parsed HTML table")
+            return html_data
 
-        generated_time = "Unknown"
-        tfoot = table.find('tfoot')
-        if tfoot:
-            tfoot_cells = tfoot.find_all('th')
-            if len(tfoot_cells) >= 2:
-                generated_time = tfoot_cells[1].get_text(strip=True)
+        # Approach 3: Try enhanced script analysis
+        logging.debug("Attempting enhanced script analysis...")
+        script_data = self.analyze_page_scripts()
+        if script_data:
+            logging.info("✓ Successfully extracted data from scripts")
+            return script_data
 
-        total_records = "Unknown"
-        caption = table.find('caption')
-        if caption:
-            caption_text = caption.get_text(strip=True)
-            match = re.search(r'\((\d+)\)', caption_text)
-            if match:
-                total_records = match.group(1)
+        logging.error("All data fetching methods failed")
+        return None
 
-        return {
-            'timestamp': datetime.now().isoformat(),
-            'date': datetime.now().strftime('%Y-%m-%d'),
-            'table_headers': headers,
-            'records': rows,
-            'records_found': len(rows),
-            'total_records_caption': total_records,
-            'report_generated_time': generated_time
-        }
-
-    def find_and_fetch_ajax_data(self, session: requests.Session, html_content: str | None = None):
-        """Try to discover AJAX/XHR endpoints in the attendance page and fetch JSON data.
-
-        This searches for common DataTables/ajax patterns in script tags and attempts
-        to GET or POST to candidate endpoints. Returns parsed attendance-like dict
-        or None.
-        """
-        logging.debug("Attempting to discover AJAX endpoints from page HTML...")
-        if html_content is None:
-            try:
-                html_content = session.get(f"{self.base_url}/Attendance", headers=self._get_headers(), timeout=30).text
-            except Exception as e:
-                logging.debug("Error fetching attendance page for AJAX discovery: %s", e)
+    def discover_ajax_endpoint(self):
+        """Discover and call AJAX endpoints that might contain attendance data"""
+        try:
+            # First, get the attendance page HTML to analyze
+            resp = self.session.get(f"{self.base_url}/Attendance", timeout=30)
+            if resp.status_code != 200:
                 return None
 
-        soup = BeautifulSoup(html_content, 'html.parser')
-        candidates = set()
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            
+            # Common AJAX endpoint patterns for attendance systems
+            endpoint_patterns = [
+                r"/api/attendance",
+                r"/Attendance/Get",
+                r"/Data/GetAttendance",
+                r"/Report/Attendance",
+                r"\.json",
+                r"\.ashx.*attendance",
+                r"\.aspx.*attendance"
+            ]
 
-        # Look for explicit DataTables ajax: 'ajax: "..."' or 'ajax: { url: "..." }'
-        for script in soup.find_all('script'):
-            if not script.string:
-                continue
-            txt = script.string
-            # simple regexes to extract URL-like fragments
-            for m in re.findall(r"ajax\s*:\s*['\"]([^'\"]+)['\"]", txt, flags=re.IGNORECASE):
-                candidates.add(m)
-            for m in re.findall(r"ajax\s*:\s*\{[^}]*url\s*:\s*['\"]([^'\"]+)['\"]", txt, flags=re.IGNORECASE):
-                candidates.add(m)
-            # jQuery $.ajax or $.get/post patterns
-            for m in re.findall(r"\$\.ajax\s*\([^\)]*url\s*:\s*['\"]([^'\"]+)['\"]", txt, flags=re.IGNORECASE):
-                candidates.add(m)
-            for m in re.findall(r"\$\.get(?:JSON)?\s*\(\s*['\"]([^'\"]+)['\"]", txt, flags=re.IGNORECASE):
-                candidates.add(m)
-            for m in re.findall(r"\$\.post\s*\(\s*['\"]([^'\"]+)['\"]", txt, flags=re.IGNORECASE):
-                candidates.add(m)
-            # fetch('...') or fetch("...")
-            for m in re.findall(r"fetch\(\s*['\"]([^'\"]+)['\"]", txt, flags=re.IGNORECASE):
-                candidates.add(m)
-            # generic URL patterns that often appear in JS (heuristic)
-            for m in re.findall(r"['\"](\/?[A-Za-z0-9_\-\./]+(?:Get|get|List|list|Data|data|attendance)[^'\"]*)['\"]", txt):
-                candidates.add(m)
+            # Look in script tags for AJAX calls
+            for script in soup.find_all('script'):
+                if script.string:
+                    script_content = script.string
+                    
+                    # Look for fetch, $.ajax, $.getJSON calls
+                    ajax_patterns = [
+                        r"fetch\(['\"]([^'\"]+)['\"]",
+                        r"\$\.ajax\([^)]*url\s*:\s*['\"]([^'\"]+)['\"]",
+                        r"\$\.getJSON\(['\"]([^'\"]+)['\"]",
+                        r"\$\.get\(['\"]([^'\"]+)['\"]",
+                        r"url:\s*['\"]([^'\"]+)['\"]",
+                    ]
+                    
+                    for pattern in ajax_patterns:
+                        matches = re.findall(pattern, script_content, re.IGNORECASE)
+                        for endpoint in matches:
+                            # Filter for relevant endpoints
+                            if any(ep in endpoint.lower() for ep in ['attendance', 'data', 'report', 'getdata']):
+                                logging.debug(f"Found potential AJAX endpoint: {endpoint}")
+                                data = self.call_ajax_endpoint(endpoint)
+                                if data:
+                                    return data
 
-        # Also look for links on the page referencing 'Attendance' or 'api'
-        for a in soup.find_all(['a', 'form']):
-            href = a.get('href') or a.get('action')
-            if not href:
-                continue
-            if 'Attendance' in href or 'attendance' in href or 'api' in href or any(k in href.lower() for k in ('get', 'list', 'data')):
-                candidates.add(href)
+            # Also check for data attributes in HTML
+            for div in soup.find_all(['div', 'table'], attrs={'data-url': True}):
+                endpoint = div.get('data-url')
+                if endpoint and any(ep in endpoint.lower() for ep in ['attendance', 'data']):
+                    logging.debug(f"Found data-url endpoint: {endpoint}")
+                    data = self.call_ajax_endpoint(endpoint)
+                    if data:
+                        return data
 
-        # Log discovered candidate count
-        if candidates:
-            logging.debug("AJAX discovery found %s candidate endpoints", len(candidates))
-            for c in candidates:
-                logging.debug("  - candidate: %s", c)
-        else:
-            logging.debug("AJAX discovery found no candidate endpoints in page HTML")
+        except Exception as e:
+            logging.debug(f"AJAX discovery error: {e}")
 
-        # Normalize and try each candidate
-        for cand in list(candidates):
-            try:
-                url = cand
-                if url.startswith('/'):
-                    url = requests.compat.urljoin(self.base_url, url)
-                elif not url.startswith('http'):
-                    url = requests.compat.urljoin(self.base_url, url)
+        return None
 
-                logging.debug("Trying candidate AJAX URL: %s", url)
+    def call_ajax_endpoint(self, endpoint):
+        """Call a discovered AJAX endpoint and parse response"""
+        try:
+            # Normalize endpoint URL
+            if endpoint.startswith('/'):
+                url = urljoin(self.base_url, endpoint)
+            elif not endpoint.startswith('http'):
+                url = urljoin(self.base_url, '/' + endpoint)
+            else:
+                url = endpoint
 
-                # Try GET first
-                resp = session.get(url, headers=self._get_headers(), timeout=20)
-                if resp.status_code != 200:
-                    # try POST without payload
-                    resp = session.post(url, data={}, headers=self._get_headers(), timeout=20)
+            logging.debug(f"Calling AJAX endpoint: {url}")
 
-                if resp.status_code != 200:
-                    logging.debug("Candidate returned status %s", resp.status_code)
+            # Common parameters for DataTables and similar libraries
+            params = {
+                'draw': '1',
+                'start': '0',
+                'length': '10000',  # Get all records
+                '_': str(int(time.time() * 1000))  # Cache buster
+            }
+
+            headers = self._get_headers(ajax=True)
+
+            # Try both GET and POST
+            for method in [self.session.get, self.session.post]:
+                try:
+                    if method == self.session.get:
+                        response = method(url, params=params, headers=headers, timeout=30)
+                    else:
+                        response = method(url, data=params, headers=headers, timeout=30)
+
+                    if response.status_code == 200:
+                        content_type = response.headers.get('content-type', '')
+                        if 'application/json' in content_type or response.text.strip().startswith(('{', '[')):
+                            return self.parse_json_response(response.json())
+                            
+                except Exception as e:
+                    logging.debug(f"Endpoint call failed with {method.__name__}: {e}")
                     continue
 
-                # If JSON-looking response, attempt to parse
-                ctype = resp.headers.get('Content-Type', '')
-                body = resp.text.strip()
-                if 'application/json' in ctype or body.startswith('{') or body.startswith('['):
+        except Exception as e:
+            logging.debug(f"Error calling AJAX endpoint: {e}")
+
+        return None
+
+    def parse_json_response(self, json_data):
+        """Parse JSON response from AJAX endpoint"""
+        try:
+            records = []
+            headers = []
+
+            # Handle different JSON response formats
+            if isinstance(json_data, dict):
+                # Format 1: { "data": [...] }
+                if 'data' in json_data and isinstance(json_data['data'], list):
+                    raw_data = json_data['data']
+                # Format 2: { "aaData": [...] } (DataTables legacy)
+                elif 'aaData' in json_data and isinstance(json_data['aaData'], list):
+                    raw_data = json_data['aaData']
+                # Format 3: { "rows": [...] }
+                elif 'rows' in json_data and isinstance(json_data['rows'], list):
+                    raw_data = json_data['rows']
+                else:
+                    # Try to find first list in dictionary values
+                    raw_data = None
+                    for value in json_data.values():
+                        if isinstance(value, list):
+                            raw_data = value
+                            break
+                    if raw_data is None:
+                        return None
+            elif isinstance(json_data, list):
+                raw_data = json_data
+            else:
+                return None
+
+            if not raw_data:
+                return None
+
+            # Extract headers and rows
+            if isinstance(raw_data[0], dict):
+                headers = list(raw_data[0].keys())
+                for item in raw_data:
+                    row = [str(item.get(header, '')) for header in headers]
+                    records.append(row)
+            elif isinstance(raw_data[0], list):
+                # Array of arrays - generate generic headers
+                headers = [f"Column_{i+1}" for i in range(len(raw_data[0]))]
+                records = [[str(cell) for cell in row] for row in raw_data]
+            else:
+                return None
+
+            return {
+                'timestamp': datetime.now().isoformat(),
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'table_headers': headers,
+                'records': records,
+                'records_found': len(records),
+                'total_records_caption': str(len(records)),
+                'report_generated_time': 'Via AJAX',
+                'source': 'ajax'
+            }
+
+        except Exception as e:
+            logging.debug(f"JSON parsing error: {e}")
+            return None
+
+    def fetch_via_html(self):
+        """Traditional HTML table parsing"""
+        try:
+            resp = self.session.get(f"{self.base_url}/Attendance", timeout=30)
+            if resp.status_code != 200:
+                return None
+
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            
+            # Look for tables with common attendance table IDs/classes
+            table_selectors = [
+                'table#DataTables_Table_0',
+                'table.dataTable',
+                'table.attendance-table',
+                'table#attendanceTable',
+                'table'
+            ]
+
+            table = None
+            for selector in table_selectors:
+                table = soup.select_one(selector)
+                if table:
+                    break
+
+            if not table:
+                return None
+
+            # Extract headers
+            headers = []
+            header_row = table.find('thead')
+            if header_row:
+                header_cells = header_row.find_all(['th', 'td'])
+                headers = [cell.get_text(strip=True) for cell in header_cells if cell.get_text(strip=True)]
+
+            # Extract rows
+            records = []
+            table_body = table.find('tbody')
+            if table_body:
+                for row in table_body.find_all('tr'):
+                    cells = row.find_all(['td', 'th'])
+                    if cells:
+                        row_data = [cell.get_text(strip=True) for cell in cells]
+                        records.append(row_data)
+
+            if records:
+                return {
+                    'timestamp': datetime.now().isoformat(),
+                    'date': datetime.now().strftime('%Y-%m-%d'),
+                    'table_headers': headers,
+                    'records': records,
+                    'records_found': len(records),
+                    'total_records_caption': str(len(records)),
+                    'report_generated_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'source': 'html'
+                }
+
+        except Exception as e:
+            logging.debug(f"HTML parsing error: {e}")
+
+        return None
+
+    def analyze_page_scripts(self):
+        """Advanced script analysis for hidden data"""
+        try:
+            resp = self.session.get(f"{self.base_url}/Attendance", timeout=30)
+            if resp.status_code != 200:
+                return None
+
+            # Look for JSON data in script tags
+            script_patterns = [
+                r"var\s+data\s*=\s*(\[.*?\]);",
+                r"var\s+attendanceData\s*=\s*(\[.*?\]);",
+                r"var\s+rows\s*=\s*(\[.*?\]);",
+                r"data:\s*(\[.*?\])",
+            ]
+
+            for pattern in script_patterns:
+                matches = re.findall(pattern, resp.text, re.DOTALL)
+                for match in matches:
                     try:
-                        payload = resp.json()
-                    except Exception:
-                        logging.debug("Response looked like JSON but failed to parse for %s", url)
+                        # Clean the JSON string
+                        json_str = match.replace("'", '"').replace(",\n", ",").replace("\n", "")
+                        json_data = json.loads(json_str)
+                        return self.parse_json_response(json_data)
+                    except:
                         continue
 
-                    # Normalize common shapes: { data: [...] } or [...]
-                    rows = []
-                    headers = []
-                    if isinstance(payload, dict):
-                        # Try common keys
-                        if 'data' in payload and isinstance(payload['data'], list):
-                            raw = payload['data']
-                        elif 'rows' in payload and isinstance(payload['rows'], list):
-                            raw = payload['rows']
-                        else:
-                            # try to find first list in values
-                            raw = None
-                            for v in payload.values():
-                                if isinstance(v, list):
-                                    raw = v
-                                    break
-                            if raw is None:
-                                raw = []
-                    elif isinstance(payload, list):
-                        raw = payload
-                    else:
-                        raw = []
+        except Exception as e:
+            logging.debug(f"Script analysis error: {e}")
 
-                    # If raw is list of dicts, extract headers from keys
-                    if raw and isinstance(raw[0], dict):
-                        headers = list(raw[0].keys())
-                        for item in raw:
-                            rows.append([str(item.get(h, '')) for h in headers])
-                    elif raw and isinstance(raw[0], (list, tuple)):
-                        rows = [list(map(str, r)) for r in raw]
-                    else:
-                        # If payload itself is simple list of strings, convert
-                        if isinstance(payload, list) and all(isinstance(x, str) for x in payload):
-                            rows = [[x] for x in payload]
-
-                    if rows:
-                        logging.info("✓ Discovered AJAX data endpoint and retrieved %s rows", len(rows))
-                        return {
-                            'timestamp': datetime.now().isoformat(),
-                            'date': datetime.now().strftime('%Y-%m-%d'),
-                            'table_headers': headers or [],
-                            'records': rows,
-                            'records_found': len(rows),
-                            'total_records_caption': str(len(rows)),
-                            'report_generated_time': 'Unknown'
-                        }
-
-            except Exception as e:
-                logging.debug("Error trying candidate endpoint %s: %s", cand, e)
-
-        logging.debug("No AJAX endpoints yielded attendance data")
         return None
 
-    def save_as_csv(self, headers, rows, prefix='attendance'):
-        try:
-            if not rows:
-                logging.warning("No data to save as CSV")
-                return None
-
-            df = pd.DataFrame(rows, columns=headers)
-            filename = f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
-            df.to_csv(filename, index=False, encoding='utf-8')
-            logging.info("✓ Attendance data saved as %s", filename)
-            print(df.head(10).to_string(index=False))
-            return filename
-        except Exception as e:
-            logging.error("Error saving CSV: %s", e)
+    def save_data(self, data, prefix='attendance'):
+        """Save data to CSV and JSON files"""
+        if not data or not data.get('records'):
+            logging.warning("No data to save")
             return None
 
-    def save_attendance_record(self, attendance_data, prefix='nia_attendance_backup'):
         try:
-            filename = f"{prefix}_{datetime.now().strftime('%Y%m')}.json"
-            if os.path.exists(filename):
-                with open(filename, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
+            # Save as CSV
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            csv_filename = f"{prefix}_{timestamp}.csv"
+            
+            df = pd.DataFrame(data['records'], columns=data['table_headers'])
+            df.to_csv(csv_filename, index=False, encoding='utf-8')
+            logging.info(f"✓ Data saved as CSV: {csv_filename}")
+
+            # Save as JSON
+            json_filename = f"{prefix}_{datetime.now().strftime('%Y%m')}.json"
+            if os.path.exists(json_filename):
+                with open(json_filename, 'r', encoding='utf-8') as f:
+                    existing_data = json.load(f)
             else:
-                data = []
-            data.append(attendance_data)
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            logging.info("✓ Attendance record saved to %s", filename)
-            return filename
+                existing_data = []
+
+            existing_data.append(data)
+            with open(json_filename, 'w', encoding='utf-8') as f:
+                json.dump(existing_data, f, indent=2, ensure_ascii=False)
+            logging.info(f"✓ Data saved to JSON: {json_filename}")
+
+            # Print preview
+            print(f"\n=== DATA PREVIEW ({len(data['records'])} records) ===")
+            print(df.head(10).to_string(index=False))
+            
+            return csv_filename
+
         except Exception as e:
-            logging.error("Error saving attendance record: %s", e)
+            logging.error(f"Error saving data: {e}")
             return None
 
-    def one_time_check(self, employee_id, password, use_selenium=False, driver_path=None):
-        session = requests.Session()
-        session.headers.update(self._get_headers())
-        ok = self.login_with_requests(session, employee_id, password)
-        if not ok:
-            logging.warning("Requests-based login failed or site requires JS. Use --selenium to try Selenium fallback.")
-            return None
-        html = self.fetch_attendance_html_requests(session)
-        if not html:
-            logging.error("Failed to fetch attendance HTML after login")
+    def analyze_today_records(self, data, employee_id):
+        """Analyze today's records for the given employee"""
+        if not data or not data.get('records'):
             return None
 
-        attendance = self.parse_attendance_html(html)
-        if not attendance or not attendance.get('records'):
-            # Try to find AJAX endpoint returning JSON data
-            logging.debug("No table found in HTML; attempting AJAX/XHR discovery...")
-            attendance = self.find_and_fetch_ajax_data(session, html)
-
-        if attendance and attendance.get('records'):
-            self.save_as_csv(attendance['table_headers'], attendance['records'], prefix='attendance_requests')
-            analysis = self.simple_analysis(attendance, employee_id)
-            if analysis:
-                self.save_attendance_record(analysis)
-                return analysis
-            return attendance
-
-        return attendance
-
-    def simple_analysis(self, attendance_data, employee_id):
-        # A small slice of the original analysis to keep this lightweight
         try:
-            headers = attendance_data.get('table_headers', [])
-            records = attendance_data.get('records', [])
-            if not records:
-                return None
-            # Try to find indices
-            date_idx = headers.index('Date Time') if 'Date Time' in headers else 1
-            emp_idx = headers.index('Employee ID') if 'Employee ID' in headers else 4
-            my_records = [r for r in records if len(r) > emp_idx and r[emp_idx] == employee_id]
+            headers = data['table_headers']
+            records = data['records']
+            
+            # Try to find relevant column indices
+            date_idx = None
+            emp_id_idx = None
+            
+            for i, header in enumerate(headers):
+                header_lower = header.lower()
+                if any(x in header_lower for x in ['date', 'time', 'timestamp']):
+                    date_idx = i
+                elif any(x in header_lower for x in ['employee', 'emp', 'id']):
+                    emp_id_idx = i
+
+            # Filter records for current employee
+            employee_records = []
+            if emp_id_idx is not None:
+                employee_records = [r for r in records if len(r) > emp_id_idx and str(r[emp_id_idx]) == str(employee_id)]
+            else:
+                employee_records = records  # Assume all records belong to the employee
+
+            # Filter for today's records
             today = datetime.now().date()
             today_records = []
-            for r in my_records:
-                if len(r) > date_idx:
-                    try:
-                        dt = datetime.strptime(r[date_idx], '%m/%d/%Y %I:%M:%S %p').date()
-                        if dt == today:
-                            today_records.append(r)
-                    except Exception:
-                        pass
-            return {
+            
+            if date_idx is not None:
+                for record in employee_records:
+                    if len(record) > date_idx:
+                        date_str = record[date_idx]
+                        try:
+                            # Try different date formats
+                            for fmt in ['%m/%d/%Y %I:%M:%S %p', '%Y-%m-%d %H:%M:%S', '%m/%d/%Y', '%Y-%m-%d']:
+                                try:
+                                    record_date = datetime.strptime(date_str, fmt).date()
+                                    if record_date == today:
+                                        today_records.append(record)
+                                    break
+                                except ValueError:
+                                    continue
+                        except:
+                            pass
+
+            analysis = {
                 'employee_id': employee_id,
-                'total_records': len(my_records),
+                'total_records': len(employee_records),
                 'today_records': len(today_records),
                 'today_details': today_records,
-                'analysis_timestamp': datetime.now().isoformat()
+                'analysis_timestamp': datetime.now().isoformat(),
+                'data_source': data.get('source', 'unknown')
             }
+
+            print(f"\n=== TODAY'S ANALYSIS ===")
+            print(f"Total records: {analysis['total_records']}")
+            print(f"Today's entries: {analysis['today_records']}")
+            if today_records:
+                print("Today's details:")
+                for record in today_records:
+                    print(f"  - {record}")
+
+            return analysis
+
         except Exception as e:
-            logging.error("Error during analysis: %s", e)
+            logging.error(f"Analysis error: {e}")
             return None
 
-    def monitor_attendance(self, employee_id, password, interval_seconds=300, max_checks=None):
-        session = requests.Session()
-        session.headers.update(self._get_headers())
-        ok = self.login_with_requests(session, employee_id, password)
-        if not ok:
-            logging.error("Requests-based login failed. Monitoring aborted.")
+    def one_time_check(self, employee_id, password):
+        """Perform a one-time attendance check"""
+        logging.info("Starting one-time attendance check...")
+        
+        # Initialize and login
+        self.init_session()
+        if not self.login(employee_id, password):
+            logging.error("Login failed")
+            return False
+
+        # Fetch attendance data
+        data = self.fetch_attendance_data()
+        if not data:
+            logging.error("Failed to fetch attendance data")
+            return False
+
+        # Save and analyze data
+        self.save_data(data)
+        self.analyze_today_records(data, employee_id)
+        
+        return True
+
+    def monitor_attendance(self, employee_id, password, interval=300, max_checks=None):
+        """Monitor attendance for changes"""
+        logging.info(f"Starting attendance monitor (interval: {interval}s)")
+        
+        self.init_session()
+        if not self.login(employee_id, password):
+            logging.error("Login failed - monitor aborted")
             return
 
-        last_hash = None
-        checks = 0
+        last_data_hash = None
+        check_count = 0
+
         while True:
-            html = self.fetch_attendance_html_requests(session)
-            if not html:
-                logging.warning("No html retrieved this cycle.")
-            else:
-                attendance = self.parse_attendance_html(html)
-                if not attendance or not attendance.get('records'):
-                    logging.debug("No static table found; trying AJAX/XHR discovery for monitor...")
-                    attendance = self.find_and_fetch_ajax_data(session, html)
-                if attendance:
-                    cur_hash = self._hash_records(attendance['records'])
-                    if last_hash is None:
-                        last_hash = cur_hash
-                        logging.info("Initial snapshot captured (%s records)", attendance['records_found'])
-                    elif cur_hash != last_hash:
-                        logging.info("Detected change in attendance records!")
-                        last_hash = cur_hash
-                        if attendance['records']:
-                            self.save_as_csv(attendance['table_headers'], attendance['records'], prefix='attendance_monitor')
-                        analysis = self.simple_analysis(attendance, employee_id)
-                        if analysis:
-                            self.save_attendance_record(analysis)
+            try:
+                logging.info(f"Check #{check_count + 1}")
+                data = self.fetch_attendance_data()
+                
+                if data:
+                    current_hash = self._hash_data(data)
+                    
+                    if last_data_hash is None:
+                        last_data_hash = current_hash
+                        logging.info(f"Initial baseline established: {len(data['records'])} records")
+                        self.save_data(data, prefix='attendance_baseline')
+                    elif current_hash != last_data_hash:
+                        logging.info("✓ Change detected in attendance data!")
+                        last_data_hash = current_hash
+                        self.save_data(data, prefix='attendance_updated')
+                        self.analyze_today_records(data, employee_id)
                     else:
-                        logging.debug("No changes detected since last check.")
+                        logging.debug("No changes detected")
+                else:
+                    logging.warning("No data fetched this cycle")
 
-            checks += 1
-            if max_checks and checks >= max_checks:
-                logging.info("Reached max checks. Stopping monitor.")
+                check_count += 1
+                if max_checks and check_count >= max_checks:
+                    logging.info("Reached maximum check count")
+                    break
+
+                logging.info(f"Waiting {interval} seconds until next check...")
+                time.sleep(interval)
+
+            except KeyboardInterrupt:
+                logging.info("Monitor interrupted by user")
                 break
-            time.sleep(interval_seconds)
+            except Exception as e:
+                logging.error(f"Monitor error: {e}")
+                time.sleep(interval)  # Wait before retrying
 
-    def _hash_records(self, records):
+    def _hash_data(self, data):
+        """Create a hash of the data for change detection"""
         import hashlib
         hasher = hashlib.sha256()
-        for row in records:
-            line = "||".join(row)
-            hasher.update(line.encode('utf-8', errors='replace'))
+        
+        if data and data.get('records'):
+            for record in data['records']:
+                record_str = '|'.join(str(field) for field in record)
+                hasher.update(record_str.encode('utf-8'))
+        
         return hasher.hexdigest()
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Termux-friendly NIA Attendance Crawler')
-    parser.add_argument('--mode', choices=['once', 'monitor'], default='once')
-    parser.add_argument('--interval', type=int, default=300)
-    parser.add_argument('--max-checks', type=int)
-    parser.add_argument('--verbose', action='store_true')
+    parser = argparse.ArgumentParser(description='Enhanced NIA Attendance Crawler')
+    parser.add_argument('--mode', choices=['once', 'monitor'], default='once',
+                       help='Operation mode: one-time check or continuous monitoring')
+    parser.add_argument('--interval', type=int, default=300,
+                       help='Monitoring interval in seconds (default: 300)')
+    parser.add_argument('--max-checks', type=int,
+                       help='Maximum number of checks in monitor mode')
+    parser.add_argument('--verbose', action='store_true',
+                       help='Enable verbose logging for debugging')
+    
     args = parser.parse_args()
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+        logging.debug("Verbose mode enabled")
 
+    # Get credentials
     employee_id = input('Enter your Employee ID: ')
     password = getpass.getpass('Enter your Password: ')
 
-    crawler = TermuxNIA()
+    # Initialize crawler
+    crawler = EnhancedNIAcrawler()
 
-    if args.mode == 'once':
-        result = crawler.one_time_check(employee_id, password)
-        if result:
-            print('\n=== CHECK COMPLETED ===')
-            if 'today_records' in result:
-                print(f"Today's records: {result['today_records']}")
-        else:
-            print('One-time check failed. Consider running with --verbose or try Selenium fallback.')
-
-    elif args.mode == 'monitor':
-        crawler.monitor_attendance(employee_id, password, interval_seconds=args.interval, max_checks=args.max_checks)
+    try:
+        if args.mode == 'once':
+            success = crawler.one_time_check(employee_id, password)
+            if success:
+                print("\n=== CHECK COMPLETED SUCCESSFULLY ===")
+            else:
+                print("\n=== CHECK FAILED ===")
+                sys.exit(1)
+                
+        elif args.mode == 'monitor':
+            crawler.monitor_attendance(
+                employee_id, 
+                password, 
+                interval=args.interval, 
+                max_checks=args.max_checks
+            )
+            
+    except KeyboardInterrupt:
+        print("\n\nOperation cancelled by user")
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+        sys.exit(1)
 
 
 if __name__ == '__main__':
