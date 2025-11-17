@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Ubuntu-in-Termux (proot) friendly NIA Attendance Crawler with Selendroid
+Ubuntu-in-Termux (proot) friendly NIA Attendance Crawler with Seledroid
 
-This version uses Selendroid for Android-native automation, which can be more
-reliable in Termux environments and provides better mobile browser compatibility.
+This version uses Seledroid (https://pypi.org/project/seledroid/) for 
+Android automation directly from Python, which is simpler than Selendroid
+and doesn't require Java server setup.
 
 Usage examples:
-  python3 attendance-crawler-selendroid.py --mode once
-  python3 attendance-crawler-selendroid.py --mode monitor --interval 300
+  python3 attendance-crawler-seledroid.py --mode once
+  python3 attendance-crawler-seledroid.py --mode monitor --interval 300
 
 Requirements:
-- Selendroid standalone server JAR file
-- Android SDK tools (for appium or selendroid)
-- Java Runtime Environment
+- seledroid package: pip install seledroid
+- ADB enabled on Android device
+- Termux with proper permissions
 """
 
 import argparse
@@ -23,20 +24,19 @@ import os
 import re
 import time
 import shutil
-import subprocess
-import signal
-import requests
 from datetime import datetime
-from threading import Thread
 
 import getpass
 import pandas as pd
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.common.exceptions import TimeoutException, WebDriverException
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+
+# Try to import seledroid
+try:
+    from seledroid import Seledroid
+    SELEDROID_AVAILABLE = True
+except ImportError:
+    SELEDROID_AVAILABLE = False
+    logging.warning("seledroid package not available. Please install with: pip install seledroid")
 
 # Logging
 logging.basicConfig(
@@ -46,179 +46,107 @@ logging.basicConfig(
 )
 
 
-class SelendroidNIA:
-    def __init__(self, headless=False, selendroid_path=None, selendroid_port=8080):
+class SeledroidNIA:
+    def __init__(self, headless=False, device_id=None, browser_package="com.android.chrome"):
         self.base_url = "https://attendance.caraga.nia.gov.ph"
         self.auth_url = "https://accounts.nia.gov.ph/Account/Login"
         self.headless = headless
-        self.selendroid_path = selendroid_path
-        self.selendroid_port = selendroid_port
-        self.selendroid_process = None
+        self.device_id = device_id
+        self.browser_package = browser_package
         self.driver = None
 
-    def _find_selendroid(self):
-        """Find Selendroid standalone server JAR"""
-        if self.selendroid_path and os.path.exists(self.selendroid_path):
-            return self.selendroid_path
-        
-        candidates = [
-            'selendroid-standalone.jar',
-            '/usr/share/java/selendroid-standalone.jar',
-            '/opt/selendroid/selendroid-standalone.jar',
-            './selendroid-standalone.jar'
-        ]
-        
-        for candidate in candidates:
-            if os.path.exists(candidate):
-                return candidate
-        
-        # Try to find in current directory
-        for file in os.listdir('.'):
-            if file.startswith('selendroid-standalone') and file.endswith('.jar'):
-                return file
-        
-        return None
-
-    def _start_selendroid_server(self):
-        """Start Selendroid standalone server"""
-        selendroid_jar = self._find_selendroid()
-        if not selendroid_jar:
-            raise WebDriverException("Selendroid standalone server JAR not found")
-        
-        logging.info(f"Starting Selendroid server on port {self.selendroid_port}")
-        
-        cmd = [
-            'java', '-jar', selendroid_jar,
-            '-port', str(self.selendroid_port)
-        ]
-        
-        self.selendroid_process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            preexec_fn=os.setsid
-        )
-        
-        # Wait for server to start
-        time.sleep(10)
-        
-        # Check if server is running
-        try:
-            response = requests.get(f"http://localhost:{self.selendroid_port}/wd/hub/status", timeout=10)
-            if response.status_code == 200:
-                logging.info("✓ Selendroid server started successfully")
-                return True
-        except Exception as e:
-            logging.error(f"Selendroid server failed to start: {e}")
-            self._stop_selendroid_server()
-            return False
-
-    def _stop_selendroid_server(self):
-        """Stop Selendroid server"""
-        if self.selendroid_process:
-            try:
-                os.killpg(os.getpgid(self.selendroid_process.pid), signal.SIGTERM)
-                self.selendroid_process.wait(timeout=10)
-                logging.info("✓ Selendroid server stopped")
-            except Exception as e:
-                logging.warning(f"Error stopping Selendroid server: {e}")
-                try:
-                    os.killpg(os.getpgid(self.selendroid_process.pid), signal.SIGKILL)
-                except:
-                    pass
-            finally:
-                self.selendroid_process = None
-
     def _create_driver(self):
-        """Create Selendroid WebDriver instance"""
-        if not self.selendroid_process:
-            if not self._start_selendroid_server():
-                raise WebDriverException("Failed to start Selendroid server")
+        """Create Seledroid driver instance"""
+        if not SELEDROID_AVAILABLE:
+            raise RuntimeError("seledroid package not available. Install with: pip install seledroid")
         
         try:
-            # Selendroid desired capabilities for Android browser
-            desired_capabilities = {
-                'browserName': 'android',
-                'platformName': 'Android',
-                'deviceName': 'android',
-                'automaticWait': True,
-                'automaticScreenshots': False,
-                'seleniumProtocol': 'WebDriver'
-            }
-            
-            self.driver = webdriver.Remote(
-                command_executor=f"http://localhost:{self.selendroid_port}/wd/hub",
-                desired_capabilities=desired_capabilities
+            # Initialize Seledroid with device ID and browser package
+            driver = Seledroid(
+                device_id=self.device_id,
+                app_package=self.browser_package,
+                app_activity="com.google.android.apps.chrome.Main"
             )
             
-            self.driver.set_page_load_timeout(60)
-            self.driver.implicitly_wait(10)
-            
-            logging.info("✓ Selendroid WebDriver created successfully")
-            return self.driver
+            logging.info("✓ Seledroid driver created successfully")
+            return driver
             
         except Exception as e:
-            logging.error(f"Failed to create Selendroid driver: {e}")
-            self._stop_selendroid_server()
-            raise WebDriverException(f"Selendroid driver creation failed: {e}")
+            logging.error(f"Failed to create Seledroid driver: {e}")
+            raise RuntimeError(f"Seledroid driver creation failed: {e}")
 
-    def _login_with_selendroid(self, driver, employee_id, password):
-        """Login using Selendroid automation"""
-        logging.info('Opening login page with Selendroid...')
+    def _login_with_seledroid(self, driver, employee_id, password):
+        """Login using Seledroid automation"""
+        logging.info('Opening login page with Seledroid...')
+        
+        # Navigate to login page
         driver.get(f"{self.auth_url}?ReturnUrl={self.base_url}/")
+        time.sleep(5)  # Wait for page load
         
-        wait = WebDriverWait(driver, 30)
+        # Find and fill employee ID field
+        employee_input = driver.find_element_by_name('EmployeeID')
+        if employee_input:
+            employee_input.clear()
+            employee_input.send_keys(employee_id)
+            logging.debug('Filled employee ID')
+        else:
+            logging.error('Could not find EmployeeID field')
+            raise Exception("EmployeeID field not found")
         
-        # Wait for and fill employee ID
-        employee_input = wait.until(EC.presence_of_element_located((By.NAME, 'EmployeeID')))
-        employee_input.clear()
-        employee_input.send_keys(employee_id)
-        
-        # Wait for and fill password
-        password_input = wait.until(EC.presence_of_element_located((By.NAME, 'Password')))
-        password_input.clear()
-        password_input.send_keys(password)
+        # Find and fill password field
+        password_input = driver.find_element_by_name('Password')
+        if password_input:
+            password_input.clear()
+            password_input.send_keys(password)
+            logging.debug('Filled password')
+        else:
+            logging.error('Could not find Password field')
+            raise Exception("Password field not found")
         
         # Submit form
         try:
-            submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+            submit_btn = driver.find_element_by_css_selector("button[type='submit']")
             submit_btn.click()
-        except Exception:
-            password_input.submit()
+            logging.debug('Clicked submit button')
+        except Exception as e:
+            logging.warning(f'Could not find submit button, trying Enter key: {e}')
+            driver.press_keycode(66)  # Enter key
         
-        # Wait for redirect to attendance page
-        wait.until(EC.url_contains(self.base_url))
-        logging.info('✓ Login successful via Selendroid')
+        # Wait for redirect and page load
+        time.sleep(8)
+        
+        # Check if we're on the attendance page
+        current_url = driver.current_url
+        if self.base_url in current_url:
+            logging.info('✓ Login successful via Seledroid')
+        else:
+            logging.warning('May not have redirected to attendance page correctly')
 
     def _load_attendance_html(self, driver):
         """Load attendance page and extract HTML"""
         logging.debug('Navigating to attendance page...')
+        
+        # Navigate directly to attendance page
         driver.get(f"{self.base_url}/Attendance")
+        time.sleep(8)  # Wait for page and JavaScript to load
         
-        wait = WebDriverWait(driver, 30)
-        wait.until(EC.presence_of_element_located((By.ID, 'DataTables_Table_0')))
-        
-        # Wait for table rows to load
-        try:
-            wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, '#DataTables_Table_0 tbody tr')) > 0)
-        except TimeoutException:
-            logging.warning('Attendance table loaded but contains no rows (yet). Proceeding with current content.')
-        
+        # Get page source
         html_content = driver.page_source
         logging.debug('Captured attendance page HTML (%s chars)', len(html_content))
+        
         return html_content
 
     def get_attendance_data(self, employee_id, password, reuse_driver=False):
-        """Main method to get attendance data using Selendroid"""
-        if not self.driver:
+        """Main method to get attendance data using Seledroid"""
+        if not self.driver or not reuse_driver:
             try:
-                self._create_driver()
-            except WebDriverException as e:
-                logging.error('Unable to start Selendroid driver: %s', e)
+                self.driver = self._create_driver()
+            except Exception as e:
+                logging.error('Unable to start Seledroid driver: %s', e)
                 return None
         
         try:
-            self._login_with_selendroid(self.driver, employee_id, password)
+            self._login_with_seledroid(self.driver, employee_id, password)
             html_content = self._load_attendance_html(self.driver)
             attendance_data = self.parse_attendance_html(html_content)
             
@@ -227,11 +155,11 @@ class SelendroidNIA:
             
             return attendance_data
             
-        except TimeoutException as e:
-            logging.error('Selendroid timed out while loading the page: %s', e)
+        except TimeoutError as e:
+            logging.error('Seledroid timed out while loading the page: %s', e)
             return None
         except Exception as e:
-            logging.error('Error fetching attendance via Selendroid: %s', e)
+            logging.error('Error fetching attendance via Seledroid: %s', e)
             return None
         finally:
             if not reuse_driver and self.driver:
@@ -307,7 +235,7 @@ class SelendroidNIA:
                 logging.warning('No data to save as CSV')
                 return
             df = pd.DataFrame(rows, columns=headers)
-            filename = f"attendance_selendroid_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+            filename = f"attendance_seledroid_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
             df.to_csv(filename, index=False, encoding='utf-8')
             logging.info('✓ Attendance data saved as %s', filename)
             print(df.head(10).to_string(index=False))
@@ -401,53 +329,67 @@ class SelendroidNIA:
             try:
                 self.driver.quit()
                 self.driver = None
+                logging.info('✓ Seledroid driver cleaned up')
             except Exception as e:
                 logging.warning(f"Error quitting driver: {e}")
-        
-        self._stop_selendroid_server()
 
 
-def check_selendroid_requirements():
+def check_seledroid_requirements():
     """Check if required tools are available"""
     requirements_met = True
     
-    # Check Java
-    try:
-        subprocess.run(['java', '-version'], capture_output=True, check=True)
-        logging.info('✓ Java is available')
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        logging.error('✗ Java is not installed or not in PATH')
+    if not SELEDROID_AVAILABLE:
+        logging.error('✗ seledroid package not installed')
+        logging.info('Please install with: pip install seledroid')
         requirements_met = False
-    
-    # Check if Selendroid JAR exists
-    selendroid_candidates = [
-        'selendroid-standalone.jar',
-        '/usr/share/java/selendroid-standalone.jar',
-        '/opt/selendroid/selendroid-standalone.jar'
-    ]
-    
-    selendroid_found = any(os.path.exists(candidate) for candidate in selendroid_candidates)
-    
-    if selendroid_found:
-        logging.info('✓ Selendroid JAR found')
     else:
-        logging.warning('⚠ Selendroid JAR not found in common locations')
-        logging.info('Please download selendroid-standalone.jar and place it in the current directory')
-        requirements_met = False
+        logging.info('✓ seledroid package is available')
+    
+    # Check if ADB is available
+    try:
+        adb_check = os.popen('adb version').read()
+        if 'Android Debug Bridge' in adb_check:
+            logging.info('✓ ADB is available')
+        else:
+            logging.warning('⚠ ADB may not be properly installed')
+    except Exception:
+        logging.warning('⚠ ADB check failed')
     
     return requirements_met
 
 
+def list_android_devices():
+    """List available Android devices"""
+    try:
+        devices_output = os.popen('adb devices').read()
+        lines = devices_output.strip().split('\n')
+        if len(lines) <= 1:
+            logging.warning('No Android devices found')
+            return []
+        
+        devices = []
+        for line in lines[1:]:
+            if line.strip() and 'device' in line:
+                device_id = line.split('\t')[0]
+                devices.append(device_id)
+        
+        logging.info(f'Found {len(devices)} Android device(s): {devices}')
+        return devices
+    except Exception as e:
+        logging.warning(f'Error listing devices: {e}')
+        return []
+
+
 def main():
-    parser = argparse.ArgumentParser(description='NIA Attendance Crawler with Selendroid')
+    parser = argparse.ArgumentParser(description='NIA Attendance Crawler with Seledroid')
     parser.add_argument('--mode', choices=['once', 'monitor'], default='once',
                        help='Run once or monitor continuously (default: once)')
     parser.add_argument('--interval', type=int, default=300,
                        help='Interval in seconds for monitor mode (default: 300)')
-    parser.add_argument('--selendroid-path', type=str,
-                       help='Path to selendroid-standalone.jar (optional)')
-    parser.add_argument('--port', type=int, default=8080,
-                       help='Port for Selendroid server (default: 8080)')
+    parser.add_argument('--device-id', type=str,
+                       help='Android device ID (optional, will use first available if not specified)')
+    parser.add_argument('--browser-package', type=str, default="com.android.chrome",
+                       help='Browser package name (default: com.android.chrome)')
     parser.add_argument('--employee-id', type=str,
                        help='Employee ID (will prompt if not provided)')
     parser.add_argument('--password', type=str,
@@ -456,23 +398,35 @@ def main():
     args = parser.parse_args()
 
     # Check requirements
-    if not check_selendroid_requirements():
+    if not check_seledroid_requirements():
         logging.error("System requirements not met. Please install missing components.")
         return
+
+    # List available devices
+    available_devices = list_android_devices()
+    if not available_devices:
+        logging.error("No Android devices found. Please connect a device and enable ADB debugging.")
+        return
+
+    # Use specified device or first available
+    device_id = args.device_id
+    if not device_id and available_devices:
+        device_id = available_devices[0]
+        logging.info(f"Using device: {device_id}")
 
     # Get credentials
     employee_id = args.employee_id or input("Enter Employee ID: ")
     password = args.password or getpass.getpass("Enter Password: ")
 
-    # Initialize Selendroid crawler
-    crawler = SelendroidNIA(
-        selendroid_path=args.selendroid_path,
-        selendroid_port=args.port
+    # Initialize Seledroid crawler
+    crawler = SeledroidNIA(
+        device_id=device_id,
+        browser_package=args.browser_package
     )
 
     try:
         if args.mode == 'once':
-            logging.info("Running in single-shot mode with Selendroid...")
+            logging.info("Running in single-shot mode with Seledroid...")
             attendance_data = crawler.get_attendance_data(employee_id, password)
             if attendance_data:
                 analysis = crawler.analyze_attendance_patterns(attendance_data, employee_id)
