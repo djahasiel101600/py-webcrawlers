@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-Ubuntu-in-Termux (proot) friendly NIA Attendance Crawler
+Ubuntu-in-Termux (proot) friendly NIA Attendance Crawler with Selendroid
 
-This script is a close port of `attendance-crawler.py` but tuned to run inside
-an Ubuntu/proot environment on Termux (Android 12). It prefers a system
-`chromedriver` (installed via apt) and Chromium/Chrome. It falls back to
-`webdriver-manager` only if necessary.
+This version uses Selendroid for Android-native automation, which can be more
+reliable in Termux environments and provides better mobile browser compatibility.
 
 Usage examples:
-  python3 attendance-crawler-ubuntu-termux.py --mode once --driver-path /usr/bin/chromedriver
-  python3 attendance-crawler-ubuntu-termux.py --mode monitor --interval 300
+  python3 attendance-crawler-selendroid.py --mode once
+  python3 attendance-crawler-selendroid.py --mode monitor --interval 300
 
-Notes:
-- Inside Termux run: `pkg install proot-distro` then `proot-distro install ubuntu-20.04`.
-  Login with `proot-distro login ubuntu-20.04` and install Chromium + chromedriver
-  with apt: `apt update; apt install -y chromium-browser chromium-chromedriver python3-pip`
-- Use `pip3 install -r requirements-ubuntu-termux.txt` inside the distro.
+Requirements:
+- Selendroid standalone server JAR file
+- Android SDK tools (for appium or selendroid)
+- Java Runtime Environment
 """
 
 import argparse
@@ -26,20 +23,20 @@ import os
 import re
 import time
 import shutil
+import subprocess
+import signal
+import requests
 from datetime import datetime
+from threading import Thread
 
 import getpass
 import pandas as pd
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException, WebDriverException
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-
-# webdriver-manager is optional; we import lazily if needed
 
 # Logging
 logging.basicConfig(
@@ -49,148 +46,206 @@ logging.basicConfig(
 )
 
 
-class UbuntuTermuxNIA:
-    def __init__(self, headless=True, driver_path=None):
+class SelendroidNIA:
+    def __init__(self, headless=False, selendroid_path=None, selendroid_port=8080):
         self.base_url = "https://attendance.caraga.nia.gov.ph"
         self.auth_url = "https://accounts.nia.gov.ph/Account/Login"
         self.headless = headless
-        self.driver_path = driver_path
+        self.selendroid_path = selendroid_path
+        self.selendroid_port = selendroid_port
+        self.selendroid_process = None
+        self.driver = None
 
-    def _find_chromedriver(self):
-        # Use explicit driver_path, then common system paths, then shutil.which
-        if self.driver_path and os.path.exists(self.driver_path):
-            return self.driver_path
+    def _find_selendroid(self):
+        """Find Selendroid standalone server JAR"""
+        if self.selendroid_path and os.path.exists(self.selendroid_path):
+            return self.selendroid_path
+        
         candidates = [
-            '/usr/bin/chromedriver',
-            '/usr/local/bin/chromedriver',
-            '/opt/chromedriver/chromedriver'
+            'selendroid-standalone.jar',
+            '/usr/share/java/selendroid-standalone.jar',
+            '/opt/selendroid/selendroid-standalone.jar',
+            './selendroid-standalone.jar'
         ]
-        for c in candidates:
-            if os.path.exists(c):
-                return c
-        binpath = shutil.which('chromedriver')
-        if binpath:
-            return binpath
+        
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+        
+        # Try to find in current directory
+        for file in os.listdir('.'):
+            if file.startswith('selendroid-standalone') and file.endswith('.jar'):
+                return file
+        
         return None
 
-    def _create_driver(self):
-        options = Options()
-        if self.headless:
-            # use new headless flag for modern Chromium
-            options.add_argument('--headless=new')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--window-size=1920,1080')
-        options.add_argument('--log-level=3')
-        options.add_argument('--disable-extensions')
-        options.add_argument('--remote-debugging-port=9222')
-
-        driver_bin = self._find_chromedriver()
-        if driver_bin:
-            service = Service(driver_bin)
-            logging.debug('Using chromedriver at %s', driver_bin)
-            driver = webdriver.Chrome(service=service, options=options)
-            driver.set_page_load_timeout(60)
-            return driver
-
-        # Last resort: try webdriver-manager (may download appropriate binary)
+    def _start_selendroid_server(self):
+        """Start Selendroid standalone server"""
+        selendroid_jar = self._find_selendroid()
+        if not selendroid_jar:
+            raise WebDriverException("Selendroid standalone server JAR not found")
+        
+        logging.info(f"Starting Selendroid server on port {self.selendroid_port}")
+        
+        cmd = [
+            'java', '-jar', selendroid_jar,
+            '-port', str(self.selendroid_port)
+        ]
+        
+        self.selendroid_process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            preexec_fn=os.setsid
+        )
+        
+        # Wait for server to start
+        time.sleep(10)
+        
+        # Check if server is running
         try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            logging.info('chromedriver not found on PATH; using webdriver-manager to install one')
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=options)
-            driver.set_page_load_timeout(60)
-            return driver
+            response = requests.get(f"http://localhost:{self.selendroid_port}/wd/hub/status", timeout=10)
+            if response.status_code == 200:
+                logging.info("✓ Selendroid server started successfully")
+                return True
         except Exception as e:
-            logging.error('chromedriver not found and webdriver-manager failed: %s', e)
-            raise WebDriverException('No chromedriver available')
+            logging.error(f"Selendroid server failed to start: {e}")
+            self._stop_selendroid_server()
+            return False
 
-    def _login_with_selenium(self, driver, employee_id, password):
-        logging.debug('Opening login page with Selenium...')
+    def _stop_selendroid_server(self):
+        """Stop Selendroid server"""
+        if self.selendroid_process:
+            try:
+                os.killpg(os.getpgid(self.selendroid_process.pid), signal.SIGTERM)
+                self.selendroid_process.wait(timeout=10)
+                logging.info("✓ Selendroid server stopped")
+            except Exception as e:
+                logging.warning(f"Error stopping Selendroid server: {e}")
+                try:
+                    os.killpg(os.getpgid(self.selendroid_process.pid), signal.SIGKILL)
+                except:
+                    pass
+            finally:
+                self.selendroid_process = None
+
+    def _create_driver(self):
+        """Create Selendroid WebDriver instance"""
+        if not self.selendroid_process:
+            if not self._start_selendroid_server():
+                raise WebDriverException("Failed to start Selendroid server")
+        
+        try:
+            # Selendroid desired capabilities for Android browser
+            desired_capabilities = {
+                'browserName': 'android',
+                'platformName': 'Android',
+                'deviceName': 'android',
+                'automaticWait': True,
+                'automaticScreenshots': False,
+                'seleniumProtocol': 'WebDriver'
+            }
+            
+            self.driver = webdriver.Remote(
+                command_executor=f"http://localhost:{self.selendroid_port}/wd/hub",
+                desired_capabilities=desired_capabilities
+            )
+            
+            self.driver.set_page_load_timeout(60)
+            self.driver.implicitly_wait(10)
+            
+            logging.info("✓ Selendroid WebDriver created successfully")
+            return self.driver
+            
+        except Exception as e:
+            logging.error(f"Failed to create Selendroid driver: {e}")
+            self._stop_selendroid_server()
+            raise WebDriverException(f"Selendroid driver creation failed: {e}")
+
+    def _login_with_selendroid(self, driver, employee_id, password):
+        """Login using Selendroid automation"""
+        logging.info('Opening login page with Selendroid...')
         driver.get(f"{self.auth_url}?ReturnUrl={self.base_url}/")
+        
         wait = WebDriverWait(driver, 30)
-
+        
+        # Wait for and fill employee ID
         employee_input = wait.until(EC.presence_of_element_located((By.NAME, 'EmployeeID')))
-        password_input = wait.until(EC.presence_of_element_located((By.NAME, 'Password')))
-
         employee_input.clear()
         employee_input.send_keys(employee_id)
+        
+        # Wait for and fill password
+        password_input = wait.until(EC.presence_of_element_located((By.NAME, 'Password')))
         password_input.clear()
         password_input.send_keys(password)
-
-        # Try to click the submit button, fall back to pressing Enter
+        
+        # Submit form
         try:
             submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
             submit_btn.click()
         except Exception:
             password_input.submit()
-
+        
+        # Wait for redirect to attendance page
         wait.until(EC.url_contains(self.base_url))
-        logging.info('✓ Login successful via Selenium')
+        logging.info('✓ Login successful via Selendroid')
 
     def _load_attendance_html(self, driver):
+        """Load attendance page and extract HTML"""
         logging.debug('Navigating to attendance page...')
         driver.get(f"{self.base_url}/Attendance")
+        
         wait = WebDriverWait(driver, 30)
         wait.until(EC.presence_of_element_located((By.ID, 'DataTables_Table_0')))
-
-        # Wait for rows to be populated (if table loads via JS)
+        
+        # Wait for table rows to load
         try:
             wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, '#DataTables_Table_0 tbody tr')) > 0)
         except TimeoutException:
             logging.warning('Attendance table loaded but contains no rows (yet). Proceeding with current content.')
-
+        
         html_content = driver.page_source
         logging.debug('Captured attendance page HTML (%s chars)', len(html_content))
         return html_content
 
-    def get_attendance_data(self, employee_id, password, driver=None, reuse_driver=False):
-        created_driver = driver is None
-        if created_driver:
+    def get_attendance_data(self, employee_id, password, reuse_driver=False):
+        """Main method to get attendance data using Selendroid"""
+        if not self.driver:
             try:
-                driver = self._create_driver()
+                self._create_driver()
             except WebDriverException as e:
-                logging.error('Unable to start Selenium driver: %s', e)
-                return None, None
-            try:
-                self._login_with_selenium(driver, employee_id, password)
-            except Exception as e:
-                logging.error('Login failed during Selenium setup: %s', e)
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
-                return None, None
-
+                logging.error('Unable to start Selendroid driver: %s', e)
+                return None
+        
         try:
-            html_content = self._load_attendance_html(driver)
+            self._login_with_selendroid(self.driver, employee_id, password)
+            html_content = self._load_attendance_html(self.driver)
             attendance_data = self.parse_attendance_html(html_content)
-
+            
             if attendance_data and attendance_data['records'] and not reuse_driver:
                 self.save_as_csv(attendance_data['table_headers'], attendance_data['records'])
-
-            return attendance_data, driver
+            
+            return attendance_data
+            
         except TimeoutException as e:
-            logging.error('Selenium timed out while loading the page: %s', e)
-            return None, driver
+            logging.error('Selendroid timed out while loading the page: %s', e)
+            return None
         except Exception as e:
-            logging.error('Error fetching attendance via Selenium: %s', e)
-            return None, driver
+            logging.error('Error fetching attendance via Selendroid: %s', e)
+            return None
         finally:
-            if created_driver and not reuse_driver and driver:
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
+            if not reuse_driver and self.driver:
+                self.cleanup()
 
     def parse_attendance_html(self, html_content):
+        """Parse attendance HTML and extract data"""
         soup = BeautifulSoup(html_content, 'html.parser')
         table = soup.find('table', {'id': 'DataTables_Table_0'})
         if not table:
             logging.error('No attendance table found on page')
             return None
 
+        # Extract headers
         headers = []
         thead = table.find('thead')
         if thead:
@@ -198,6 +253,7 @@ class UbuntuTermuxNIA:
             if header_row:
                 headers = [th.get_text(strip=True) for th in header_row.find_all('th')]
 
+        # Extract rows
         rows = []
         table_body = table.find('tbody')
         if table_body:
@@ -218,6 +274,7 @@ class UbuntuTermuxNIA:
                         row_data.append(cell.get_text(strip=True))
                 rows.append(row_data)
 
+        # Extract metadata
         generated_time = 'Unknown'
         tfoot = table.find('tfoot')
         if tfoot:
@@ -244,12 +301,13 @@ class UbuntuTermuxNIA:
         }
 
     def save_as_csv(self, headers, rows):
+        """Save attendance data as CSV"""
         try:
             if not rows:
                 logging.warning('No data to save as CSV')
                 return
             df = pd.DataFrame(rows, columns=headers)
-            filename = f"attendance_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+            filename = f"attendance_selendroid_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
             df.to_csv(filename, index=False, encoding='utf-8')
             logging.info('✓ Attendance data saved as %s', filename)
             print(df.head(10).to_string(index=False))
@@ -257,25 +315,40 @@ class UbuntuTermuxNIA:
             logging.error('Error saving CSV: %s', e)
 
     def analyze_attendance_patterns(self, attendance_data, employee_id):
+        """Analyze attendance patterns for specific employee"""
         try:
             if not attendance_data or 'records' not in attendance_data:
                 logging.warning('No attendance data to analyze')
                 return None
+            
             headers = attendance_data['table_headers']
             records = attendance_data['records']
+            
             if not records:
-                logging.warning(f'No records found')
+                logging.warning('No records found')
                 return None
+            
+            # Find indices
             date_time_idx = headers.index('Date Time') if 'Date Time' in headers else 1
             emp_id_idx = headers.index('Employee ID') if 'Employee ID' in headers else 4
-            my_records = [record for record in records if len(record) > emp_id_idx and record[emp_id_idx] == employee_id]
+            
+            # Filter records for this employee
+            my_records = [
+                record for record in records 
+                if len(record) > emp_id_idx and record[emp_id_idx] == employee_id
+            ]
+            
             logging.debug('ATTENDANCE ANALYSIS FOR EMPLOYEE %s', employee_id)
             logging.debug('Total records found: %s', len(my_records))
+            
             if not my_records:
                 logging.warning(f'No matching records found for Employee ID: {employee_id}')
                 return None
+            
+            # Analyze today's records
             today = datetime.now().date()
             today_records = []
+            
             for record in my_records:
                 if len(record) > date_time_idx:
                     date_str = record[date_time_idx]
@@ -291,13 +364,16 @@ class UbuntuTermuxNIA:
                                 today_records.append(record)
                         except ValueError:
                             pass
+            
             logging.info('Records for today (%s): %s', today, len(today_records))
+            
             if today_records:
                 logging.info("Today's attendance:")
                 for record in today_records:
                     time_in_record = record[date_time_idx] if len(record) > date_time_idx else 'N/A'
                     temp = record[2] if len(record) > 2 else 'N/A'
                     logging.info(f"  - {time_in_record} (Temp: {temp}°C)")
+                
                 if len(today_records) < 2:
                     logging.warning('⚠️  WARNING: Only one record today. Make sure you have both Time In and Time Out.')
                 elif len(today_records) % 2 != 0:
@@ -306,6 +382,7 @@ class UbuntuTermuxNIA:
                     logging.info('✓ Good: Even number of records today (likely both Time In and Time Out)')
             else:
                 logging.info('No records found for today')
+            
             return {
                 'employee_id': employee_id,
                 'total_records': len(my_records),
@@ -313,23 +390,64 @@ class UbuntuTermuxNIA:
                 'today_details': today_records,
                 'analysis_timestamp': datetime.now().isoformat()
             }
+            
         except Exception as e:
             logging.error('Error analyzing attendance: %s', e)
             return None
 
+    def cleanup(self):
+        """Clean up resources"""
+        if self.driver:
+            try:
+                self.driver.quit()
+                self.driver = None
+            except Exception as e:
+                logging.warning(f"Error quitting driver: {e}")
+        
+        self._stop_selendroid_server()
+
+
+def check_selendroid_requirements():
+    """Check if required tools are available"""
+    requirements_met = True
+    
+    # Check Java
+    try:
+        subprocess.run(['java', '-version'], capture_output=True, check=True)
+        logging.info('✓ Java is available')
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        logging.error('✗ Java is not installed or not in PATH')
+        requirements_met = False
+    
+    # Check if Selendroid JAR exists
+    selendroid_candidates = [
+        'selendroid-standalone.jar',
+        '/usr/share/java/selendroid-standalone.jar',
+        '/opt/selendroid/selendroid-standalone.jar'
+    ]
+    
+    selendroid_found = any(os.path.exists(candidate) for candidate in selendroid_candidates)
+    
+    if selendroid_found:
+        logging.info('✓ Selendroid JAR found')
+    else:
+        logging.warning('⚠ Selendroid JAR not found in common locations')
+        logging.info('Please download selendroid-standalone.jar and place it in the current directory')
+        requirements_met = False
+    
+    return requirements_met
+
 
 def main():
-    parser = argparse.ArgumentParser(description='NIA Attendance Crawler for Ubuntu/Termux')
+    parser = argparse.ArgumentParser(description='NIA Attendance Crawler with Selendroid')
     parser.add_argument('--mode', choices=['once', 'monitor'], default='once',
                        help='Run once or monitor continuously (default: once)')
     parser.add_argument('--interval', type=int, default=300,
                        help='Interval in seconds for monitor mode (default: 300)')
-    parser.add_argument('--driver-path', type=str,
-                       help='Path to chromedriver (optional)')
-    parser.add_argument('--headless', action='store_true', default=True,
-                       help='Run in headless mode (default: True)')
-    parser.add_argument('--no-headless', action='store_false', dest='headless',
-                       help='Disable headless mode')
+    parser.add_argument('--selendroid-path', type=str,
+                       help='Path to selendroid-standalone.jar (optional)')
+    parser.add_argument('--port', type=int, default=8080,
+                       help='Port for Selendroid server (default: 8080)')
     parser.add_argument('--employee-id', type=str,
                        help='Employee ID (will prompt if not provided)')
     parser.add_argument('--password', type=str,
@@ -337,60 +455,59 @@ def main():
     
     args = parser.parse_args()
 
+    # Check requirements
+    if not check_selendroid_requirements():
+        logging.error("System requirements not met. Please install missing components.")
+        return
+
     # Get credentials
     employee_id = args.employee_id or input("Enter Employee ID: ")
     password = args.password or getpass.getpass("Enter Password: ")
 
-    # Initialize crawler
-    crawler = UbuntuTermuxNIA(headless=args.headless, driver_path=args.driver_path)
+    # Initialize Selendroid crawler
+    crawler = SelendroidNIA(
+        selendroid_path=args.selendroid_path,
+        selendroid_port=args.port
+    )
 
-    if args.mode == 'once':
-        logging.info("Running in single-shot mode...")
-        attendance_data, driver = crawler.get_attendance_data(employee_id, password)
-        if attendance_data:
-            analysis = crawler.analyze_attendance_patterns(attendance_data, employee_id)
-            logging.info("Single run completed successfully")
-        else:
-            logging.error("Failed to fetch attendance data")
+    try:
+        if args.mode == 'once':
+            logging.info("Running in single-shot mode with Selendroid...")
+            attendance_data = crawler.get_attendance_data(employee_id, password)
+            if attendance_data:
+                analysis = crawler.analyze_attendance_patterns(attendance_data, employee_id)
+                logging.info("Single run completed successfully")
+            else:
+                logging.error("Failed to fetch attendance data")
 
-    elif args.mode == 'monitor':
-        logging.info(f"Starting monitor mode with {args.interval} second intervals...")
-        driver = None
-        run_count = 0
-        
-        try:
-            while True:
-                run_count += 1
-                logging.info(f"Monitor run #{run_count} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        elif args.mode == 'monitor':
+            logging.info(f"Starting monitor mode with {args.interval} second intervals...")
+            run_count = 0
+            
+            try:
+                while True:
+                    run_count += 1
+                    logging.info(f"Monitor run #{run_count} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    
+                    attendance_data = crawler.get_attendance_data(
+                        employee_id, password, reuse_driver=True
+                    )
+                    
+                    if attendance_data:
+                        analysis = crawler.analyze_attendance_patterns(attendance_data, employee_id)
+                    else:
+                        logging.error("Failed to fetch attendance data in monitor run #%d", run_count)
+                        # Reset on failure
+                        crawler.cleanup()
+                    
+                    logging.info(f"Waiting {args.interval} seconds until next run...")
+                    time.sleep(args.interval)
+                    
+            except KeyboardInterrupt:
+                logging.info("Monitor mode interrupted by user")
                 
-                # Reuse driver for multiple runs to improve performance
-                attendance_data, driver = crawler.get_attendance_data(
-                    employee_id, password, driver=driver, reuse_driver=True
-                )
-                
-                if attendance_data:
-                    analysis = crawler.analyze_attendance_patterns(attendance_data, employee_id)
-                else:
-                    logging.error("Failed to fetch attendance data in monitor run #%d", run_count)
-                    # Reset driver on failure
-                    if driver:
-                        try:
-                            driver.quit()
-                        except Exception:
-                            pass
-                        driver = None
-                
-                logging.info(f"Waiting {args.interval} seconds until next run...")
-                time.sleep(args.interval)
-                
-        except KeyboardInterrupt:
-            logging.info("Monitor mode interrupted by user")
-        finally:
-            if driver:
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
+    finally:
+        crawler.cleanup()
 
 
 if __name__ == '__main__':
