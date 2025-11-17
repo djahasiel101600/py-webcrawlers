@@ -200,8 +200,18 @@ class TermuxNIA:
                 candidates.add(m)
             for m in re.findall(r"ajax\s*:\s*\{[^}]*url\s*:\s*['\"]([^'\"]+)['\"]", txt, flags=re.IGNORECASE):
                 candidates.add(m)
-            # generic URL patterns that often appear in JS
-            for m in re.findall(r"['\"](\/?[A-Za-z0-9_\-\./]+(?:Get|get|List|list|Data|data)[^'\"]*)['\"]", txt):
+            # jQuery $.ajax or $.get/post patterns
+            for m in re.findall(r"\$\.ajax\s*\([^\)]*url\s*:\s*['\"]([^'\"]+)['\"]", txt, flags=re.IGNORECASE):
+                candidates.add(m)
+            for m in re.findall(r"\$\.get(?:JSON)?\s*\(\s*['\"]([^'\"]+)['\"]", txt, flags=re.IGNORECASE):
+                candidates.add(m)
+            for m in re.findall(r"\$\.post\s*\(\s*['\"]([^'\"]+)['\"]", txt, flags=re.IGNORECASE):
+                candidates.add(m)
+            # fetch('...') or fetch("...")
+            for m in re.findall(r"fetch\(\s*['\"]([^'\"]+)['\"]", txt, flags=re.IGNORECASE):
+                candidates.add(m)
+            # generic URL patterns that often appear in JS (heuristic)
+            for m in re.findall(r"['\"](\/?[A-Za-z0-9_\-\./]+(?:Get|get|List|list|Data|data|attendance)[^'\"]*)['\"]", txt):
                 candidates.add(m)
 
         # Also look for links on the page referencing 'Attendance' or 'api'
@@ -211,6 +221,14 @@ class TermuxNIA:
                 continue
             if 'Attendance' in href or 'attendance' in href or 'api' in href or any(k in href.lower() for k in ('get', 'list', 'data')):
                 candidates.add(href)
+
+        # Log discovered candidate count
+        if candidates:
+            logging.debug("AJAX discovery found %s candidate endpoints", len(candidates))
+            for c in candidates:
+                logging.debug("  - candidate: %s", c)
+        else:
+            logging.debug("AJAX discovery found no candidate endpoints in page HTML")
 
         # Normalize and try each candidate
         for cand in list(candidates):
