@@ -638,40 +638,36 @@ class NIAAttendanceMonitor:
             emp_id_idx = 4      # Employee ID is the fifth column (index 4)
             temp_idx = 2        # Temperature is the third column (index 2)
             
-        # Get ALL records for this employee (don't filter by FAILED status)
-        my_records = []
-        failed_records = []
-        for record in records:
-            if len(record) <= max(action_idx, emp_id_idx):
-                continue
-            action_val = record[action_idx] if len(record) > action_idx else ""
-            emp_val = record[emp_id_idx] if len(record) > emp_id_idx else ""
-            
-            # FIX: Better employee ID matching with stripping and type conversion
-            is_for_employee = False
-            if emp_val and employee_id:
-                # Convert both to strings and strip whitespace for comparison
-                emp_val_clean = str(emp_val).strip()
-                employee_id_clean = str(employee_id).strip()
-                is_for_employee = emp_val_clean == employee_id_clean
-            
-            # ONLY include records for this employee
-            if is_for_employee:
-                my_records.append(record)
-                if "FAILED" in str(action_val).upper():
-                    failed_records.append(record)
+            # Get ALL records for this employee (don't filter by FAILED status)
+            my_records = []
+            failed_records = []
+            for record in records:
+                if len(record) <= max(action_idx, emp_id_idx):
+                    continue
+                action_val = record[action_idx] if len(record) > action_idx else ""
+                emp_val = record[emp_id_idx] if len(record) > emp_id_idx else ""
+                
+                # FIX: Better employee ID matching with stripping and type conversion
+                is_for_employee = False
+                if emp_val and employee_id:
+                    # Convert both to strings and strip whitespace for comparison
+                    emp_val_clean = str(emp_val).strip()
+                    employee_id_clean = str(employee_id).strip()
+                    is_for_employee = emp_val_clean == employee_id_clean
+                
+                # ONLY include records for this employee
+                if is_for_employee:
+                    my_records.append(record)
+                    if "FAILED" in str(action_val).upper():
+                        failed_records.append(record)
 
-        # DEBUG: Show what we found
-        logging.debug(f"Looking for employee ID: '{employee_id}'")
-        logging.debug(f"Employee ID type: {type(employee_id)}")
-        for i, record in enumerate(records[:3]):  # Show first 3 records for debugging
-            if len(record) > emp_id_idx:
-                emp_val = record[emp_id_idx]
-                logging.debug(f"Record {i} emp_id: '{emp_val}' (type: {type(emp_val)})")
-            
-            logging.info("ATTENDANCE ANALYSIS FOR EMPLOYEE %s", employee_id)
-            logging.info("Total YOUR records found: %s", len(my_records))
-            logging.info("Total ALL records in system: %s", len(records))
+            # DEBUG: Show what we found
+            logging.debug(f"Looking for employee ID: '{employee_id}'")
+            logging.debug(f"Employee ID type: {type(employee_id)}")
+            for i, record in enumerate(records[:3]):  # Show first 3 records for debugging
+                if len(record) > emp_id_idx:
+                    emp_val = record[emp_id_idx]
+                    logging.debug(f"Record {i} emp_id: '{emp_val}' (type: {type(emp_val)})")
             
             if failed_records:
                 logging.warning("Found %s FAILED record(s) in your data", len(failed_records))
@@ -967,12 +963,16 @@ def main():
 
             # Show ALL your records in the table
             if attendance_data and 'records' in attendance_data:
-                # Filter to only show records for this employee
+                # Filter to only show records for this employee (with better matching)
                 emp_id_idx = 4  # Employee ID column index
-                all_your_records = [
-                    record for record in attendance_data['records'] 
-                    if len(record) > emp_id_idx and record[emp_id_idx] == employee_id
-                ]
+                all_your_records = []
+                
+                for record in attendance_data['records']:
+                    if len(record) > emp_id_idx:
+                        emp_val = record[emp_id_idx]
+                        # Better matching with stripping
+                        if emp_val and str(emp_val).strip() == str(employee_id).strip():
+                            all_your_records.append(record)
                 
                 if all_your_records:
                     table = Table(show_header=True, header_style="bold cyan")
@@ -988,11 +988,13 @@ def main():
                     console.print(f"[bold]Total your records displayed:[/] {len(all_your_records)}")
                 else:
                     console.print("[yellow]No records found for your employee ID[/yellow]")
-                    # Show what employee IDs ARE available for debugging
+                    # Enhanced debugging
+                    console.print(f"[dim]Your employee ID: '{employee_id}' (type: {type(employee_id)})[/dim]")
                     emp_ids_in_data = set()
                     for record in attendance_data['records']:
                         if len(record) > emp_id_idx and record[emp_id_idx]:
-                            emp_ids_in_data.add(record[emp_id_idx])
+                            emp_val = record[emp_id_idx]
+                            emp_ids_in_data.add(f"'{emp_val}' (type: {type(emp_val)})")
                     console.print(f"[dim]Employee IDs found in data: {emp_ids_in_data}[/dim]")
             else:
                 console.print("[red]No attendance data available[/red]")
