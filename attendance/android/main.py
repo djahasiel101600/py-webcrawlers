@@ -964,18 +964,39 @@ def main():
             if analysis.get('note'):
                 console.print(f"[yellow]{analysis['note']}[/yellow]")
 
-            # Show ONLY TODAY'S records in the table
+            # Show ONLY TODAY'S records in the table with specific columns
             today_details = analysis.get('today_details', [])
             if today_details:
+                # Create table with only the columns we want to show
                 table = Table(show_header=True, header_style="bold cyan")
-                headers = attendance_data['table_headers']
-                for header in headers:
-                    table.add_column(header, overflow="fold")
+                table.add_column("Entry #", justify="right", style="white")
+                table.add_column("Date & Time", style="green", overflow="fold")
+                table.add_column("Temperature", style="yellow", justify="center")
+                table.add_column("Action / Status", style="magenta", overflow="fold")
+                
+                # Define column indices based on the table structure
+                # From your headers: [Actions, Date Time, Temperature, Employee Name, Employee ID, Machine Name]
+                action_idx = 0      # Actions column
+                date_time_idx = 1   # Date Time column  
+                temp_idx = 2        # Temperature column
                 
                 for idx, row in enumerate(today_details, start=1):
-                    action = row[0] if len(row) > 0 else ""
+                    # Extract the specific columns we want to display
+                    date_time = row[date_time_idx] if len(row) > date_time_idx else "N/A"
+                    temperature = row[temp_idx] if len(row) > temp_idx else "N/A"
+                    action = row[action_idx] if len(row) > action_idx else "N/A"
+                    
+                    # Style failed records in red
                     row_style = "red" if "FAILED" in str(action).upper() else None
-                    table.add_row(str(idx), *[str(cell) for cell in row], style=row_style)
+                    
+                    table.add_row(
+                        str(idx),
+                        date_time,
+                        temperature,
+                        action,
+                        style=row_style
+                    )
+                
                 console.print(table)
                 console.print(f"[bold]Today's records displayed:[/] {len(today_details)}")
                 
@@ -991,11 +1012,15 @@ def main():
                 # Show available dates for context
                 if attendance_data and 'records' in attendance_data:
                     dates_found = set()
-                    emp_id_idx = 4
+                    emp_id_idx = 4  # Employee ID column
                     for record in attendance_data['records']:
                         if len(record) > emp_id_idx and str(record[emp_id_idx]).strip() == str(employee_id).strip():
                             if len(record) > 1:  # Has date field
-                                dates_found.add(record[1].split()[0])  # Get just the date part
+                                # Extract just the date part (before time)
+                                date_str = record[1]
+                                date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', date_str)
+                                if date_match:
+                                    dates_found.add(date_match.group(1))
                     if dates_found:
                         console.print(f"[dim]Your records found on dates: {sorted(dates_found)}[/dim]")
         else:
