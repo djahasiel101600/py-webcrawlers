@@ -20,6 +20,12 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
 from rich.logging import RichHandler
+from contextlib import contextmanager
+from functools import wraps
+from typing import List, Optional, Dict, Any, Callable
+import yaml
+from dataclasses import dataclass
+import pickle
 
 console = Console()
 
@@ -31,13 +37,198 @@ logging.basicConfig(
     handlers=[RichHandler(console=console, rich_tracebacks=True, markup=True)]
 )
 
+class Config:
+    def __init__(self):
+        self.defaults = {
+            'base_url': "https://attendance.caraga.nia.gov.ph",
+            'auth_url': "https://accounts.nia.gov.ph/Account/Login",
+            'timeout': 60,
+            'monitor_interval': 300,
+            'max_retries': 3,
+            'headless': True,
+            'browser_width': 1920,
+            'browser_height': 1080
+        }
+        self.config_path = os.path.expanduser('~/.nia_monitor_config.yaml')
+    
+    def load(self):
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, 'r') as f:
+                    user_config = yaml.safe_load(f) or {}
+                    return {**self.defaults, **user_config}
+            except Exception as e:
+                logging.warning(f"Error loading config: {e}. Using defaults.")
+        return self.defaults.copy()
+    
+    def save(self, config_data):
+        try:
+            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+            with open(self.config_path, 'w') as f:
+                yaml.dump(config_data, f, default_flow_style=False)
+            logging.info("✓ Configuration saved")
+        except Exception as e:
+            logging.error(f"Error saving config: {e}")
+
+def retry_on_failure(max_retries: int = 3, delay: float = 2.0):
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except (TimeoutException, WebDriverException, Exception) as e:
+                    last_exception = e
+                    if attempt < max_retries - 1:
+                        logging.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay}s...")
+                        time.sleep(delay)
+            logging.error(f"All {max_retries} attempts failed")
+            raise last_exception
+        return wrapper
+    return decorator
+
+@dataclass
+class AttendanceRecord:
+    date_time: datetime
+    temperature: Optional[float]
+    employee_id: str
+    employee_name: str
+    machine_name: str
+    status: str
+    action_details: str
+    
+    @classmethod
+    def from_table_row(cls, headers: List[str], row: List[str]) -> 'AttendanceRecord':
+        """Create record from table row with validation"""
+        # Map headers to fields
+        field_map = {
+            'date_time': ['Date Time', 'DateTime', 'Time'],
+            'temperature': ['Temperature', 'Temp'],
+            'employee_id': ['Employee ID', 'EmpID'],
+            'employee_name': ['Employee Name', 'Name'],
+            'machine_name': ['Machine Name', 'Machine'],
+            'status': ['Actions', 'Status']
+        }
+        
+        # Extract values based on header mapping
+        values = {}
+        for field, possible_headers in field_map.items():
+            for header in possible_headers:
+                if header in headers:
+                    idx = headers.index(header)
+                    if idx < len(row):
+                        values[field] = row[idx]
+                        break
+            # Fallback to index-based if header not found
+            if field not in values and len(headers) > 0 and len(row) > 0:
+                if field == 'date_time' and len(row) > 1:
+                    values[field] = row[1]
+                elif field == 'temperature' and len(row) > 2:
+                    values[field] = row[2]
+                elif field == 'employee_id' and len(row) > 4:
+                    values[field] = row[4]
+                elif field == 'employee_name' and len(row) > 3:
+                    values[field] = row[3]
+                elif field == 'machine_name' and len(row) > 5:
+                    values[field] = row[5]
+                elif field == 'status' and len(row) > 0:
+                    values[field] = row[0]
+        
+        # Parse date time
+        date_time = datetime.now()
+        if 'date_time' in values:
+            try:
+                date_str = ' '.join(values['date_time'].split())
+                date_time = datetime.strptime(date_str, '%m/%d/%Y %I:%M:%S %p')
+            except ValueError:
+                try:
+                    date_time = datetime.strptime(date_str, '%m/%d/%Y %I:%M %p')
+                except ValueError:
+                    logging.warning(f"Could not parse date: {values['date_time']}")
+        
+        # Parse temperature
+        temperature = None
+        if 'temperature' in values:
+            temp_str = values['temperature'].replace('°C', '').strip()
+            try:
+                temperature = float(temp_str) if temp_str else None
+            except ValueError:
+                pass
+        
+        return cls(
+            date_time=date_time,
+            temperature=temperature,
+            employee_id=values.get('employee_id', ''),
+            employee_name=values.get('employee_name', ''),
+            machine_name=values.get('machine_name', ''),
+            status=values.get('status', ''),
+            action_details=values.get('status', '')
+        )
+
 class NIAAttendanceMonitor:
-    def __init__(self, headless=True, driver_path=None):
-        self.base_url = "https://attendance.caraga.nia.gov.ph"
-        self.auth_url = "https://accounts.nia.gov.ph/Account/Login"
+    def __init__(self, headless=True, driver_path=None, config=None):
+        self.config = config or Config().load()
+        self.base_url = self.config['base_url']
+        self.auth_url = self.config['auth_url']
         self.headless = headless
         self.driver_path = driver_path
+        self.state_file = os.path.expanduser('~/.nia_monitor_state.json')
+        self._load_state()
     
+    def _load_state(self):
+        try:
+            if os.path.exists(self.state_file):
+                with open(self.state_file, 'r') as f:
+                    self.state = json.load(f)
+            else:
+                self.state = {'last_check': None, 'known_records': []}
+        except Exception as e:
+            logging.warning(f"Could not load state: {e}")
+            self.state = {'last_check': None, 'known_records': []}
+    
+    def _save_state(self):
+        try:
+            with open(self.state_file, 'w') as f:
+                json.dump(self.state, f, indent=2)
+        except Exception as e:
+            logging.error(f"Could not save state: {e}")
+    
+    def _hash_record(self, record: AttendanceRecord) -> str:
+        key_data = f"{record.employee_id}_{record.date_time.isoformat()}_{record.status}"
+        return hashlib.sha256(key_data.encode()).hexdigest()
+    
+    def detect_changes(self, current_records: List[AttendanceRecord]) -> Dict[str, Any]:
+        current_hashes = [self._hash_record(record) for record in current_records]
+        previous_hashes = self.state.get('known_records', [])
+        
+        new_records = [r for r in current_records if self._hash_record(r) not in previous_hashes]
+        missing_records = [h for h in previous_hashes if h not in current_hashes]
+        
+        self.state['known_records'] = current_hashes
+        self.state['last_check'] = datetime.now().isoformat()
+        self._save_state()
+        
+        return {
+            'new_records': new_records,
+            'missing_records': missing_records,
+            'total_current': len(current_records),
+            'changes_detected': len(new_records) > 0 or len(missing_records) > 0
+        }
+
+    @contextmanager
+    def browser_session(self):
+        driver = None
+        try:
+            driver = self._create_driver()
+            yield driver
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except Exception as e:
+                    logging.debug(f"Error closing driver: {e}")
+
     def _create_driver(self):
         """Create Firefox driver optimized for Android/Termux"""
         options = Options()
@@ -49,8 +240,8 @@ class NIAAttendanceMonitor:
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--width=1920")
-        options.add_argument("--height=1080")
+        options.add_argument(f"--width={self.config['browser_width']}")
+        options.add_argument(f"--height={self.config['browser_height']}")
         
         # Set Firefox binary path for Termux
         firefox_binary = "/data/data/com.termux/files/usr/bin/firefox"
@@ -78,10 +269,11 @@ class NIAAttendanceMonitor:
                 service = Service()
         
         driver = webdriver.Firefox(service=service, options=options)
-        driver.set_page_load_timeout(60)
-        driver.implicitly_wait(10)  # Add implicit wait
+        driver.set_page_load_timeout(self.config['timeout'])
+        driver.implicitly_wait(10)
         return driver
 
+    @retry_on_failure(max_retries=3, delay=2.0)
     def _login_with_selenium(self, driver, employee_id, password):
         logging.debug("Opening login page with Selenium...")
         driver.get(f"{self.auth_url}?ReturnUrl={self.base_url}/")
@@ -151,6 +343,7 @@ class NIAAttendanceMonitor:
         except:
             pass
 
+    @retry_on_failure(max_retries=2, delay=3.0)
     def _load_attendance_html(self, driver):
         """Load attendance page with specific waiting for the table structure"""
         logging.debug("Navigating to attendance page...")
@@ -333,66 +526,59 @@ class NIAAttendanceMonitor:
             'note': 'Data extracted using fallback method - table not found'
         }
 
-    def get_attendance_data(self, employee_id, password, driver=None, reuse_driver=False):
+    def get_attendance_data(self, employee_id, password):
         """Use Selenium to log in and extract attendance data"""
-        created_driver = driver is None
-        if created_driver:
-            try:
-                driver = self._create_driver()
-            except WebDriverException as e:
-                logging.error(f"Unable to start Firefox driver: {e}")
-                logging.info("Make sure Firefox and geckodriver are installed in Termux")
-                return None, None
-            
+        with self.browser_session() as driver:
             try:
                 self._login_with_selenium(driver, employee_id, password)
+                html_content = self._load_attendance_html(driver)
+                attendance_data = self.parse_attendance_html(html_content)
+                
+                if attendance_data and attendance_data['records']:
+                    # Convert to AttendanceRecord objects for change detection
+                    record_objects = [
+                        AttendanceRecord.from_table_row(
+                            attendance_data['table_headers'], 
+                            row
+                        ) for row in attendance_data['records']
+                    ]
+                    
+                    # Detect changes
+                    changes = self.detect_changes(record_objects)
+                    if changes['changes_detected']:
+                        logging.info(f"📈 Changes detected: {len(changes['new_records'])} new records")
+                        if changes['new_records']:
+                            for record in changes['new_records']:
+                                logging.info(f"   NEW: {record.date_time} - {record.status}")
+                    
+                    # Save CSV with metadata
+                    metadata = {
+                        'employee_id': employee_id,
+                        'total_records': len(attendance_data['records']),
+                        'changes_detected': changes['changes_detected'],
+                        'new_records_count': len(changes['new_records'])
+                    }
+                    self.save_as_csv(
+                        attendance_data['table_headers'], 
+                        attendance_data['records'],
+                        metadata
+                    )
+                
+                return attendance_data
+                
             except Exception as e:
-                logging.error(f"Login failed: {e}")
-                # Save the page HTML for debugging
+                logging.error(f"Error fetching attendance data: {e}")
+                # Save debug HTML
                 try:
-                    with open("login_debug.html", "w", encoding="utf-8") as f:
+                    with open("error_debug.html", "w", encoding="utf-8") as f:
                         f.write(driver.page_source)
-                    logging.info("Saved login page HTML to login_debug.html for inspection")
+                    logging.info("Saved error page HTML to error_debug.html")
                 except:
                     pass
-                if driver:
-                    driver.quit()
-                return None, None
+                return None
 
-        try:
-            # Debug: Check current URL before loading attendance
-            logging.debug(f"Current URL before loading attendance: {driver.current_url}")
-            
-            html_content = self._load_attendance_html(driver)
-            attendance_data = self.parse_attendance_html(html_content)
-
-            if attendance_data and attendance_data['records'] and not reuse_driver:
-                self.save_as_csv(attendance_data['table_headers'], attendance_data['records'])
-
-            return attendance_data, driver
-            
-        except TimeoutException as e:
-            logging.error(f"Selenium timed out while loading the page: {e}")
-            # Save debug HTML
-            try:
-                with open("timeout_debug.html", "w", encoding="utf-8") as f:
-                    f.write(driver.page_source)
-                logging.info("Saved timeout page HTML to timeout_debug.html")
-            except:
-                pass
-            return None, driver
-        except Exception as e:
-            logging.error(f"Error fetching attendance via Selenium: {e}")
-            return None, driver
-        finally:
-            if created_driver and not reuse_driver and driver:
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
-    # Replace the save_as_csv method with this:
-    def save_as_csv(self, headers, rows):
-        """Save attendance data as CSV file using built-in csv module"""
+    def save_as_csv(self, headers, rows, metadata=None):
+        """Save attendance data as CSV file with metadata comments"""
         try:
             if not rows:
                 logging.warning("No data to save as CSV")
@@ -401,8 +587,17 @@ class NIAAttendanceMonitor:
             # Generate filename with current date
             filename = f"attendance_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
 
-            # Write CSV using built-in csv module
+            # Write CSV with metadata comments
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                # Write metadata as comments
+                if metadata:
+                    csvfile.write("# NIA Attendance Export\n")
+                    csvfile.write(f"# Generated: {datetime.now().isoformat()}\n")
+                    for key, value in metadata.items():
+                        csvfile.write(f"# {key}: {value}\n")
+                    csvfile.write(f"# Total Records: {len(rows)}\n")
+                    csvfile.write("#\n")
+                
                 writer = csv.writer(csvfile)
                 # Write headers
                 writer.writerow(headers)
@@ -417,9 +612,11 @@ class NIAAttendanceMonitor:
                 logging.debug(row)
 
             logging.debug("Total records: %s", len(rows))
+            return filename
 
         except Exception as e:
-            logging.error(f"Error saving CSV: {e}")  
+            logging.error(f"Error saving CSV: {e}")
+            return None
     
     def analyze_attendance_patterns(self, attendance_data, employee_id):
         """Analyze attendance patterns and detect potential issues"""
@@ -436,7 +633,6 @@ class NIAAttendanceMonitor:
                 return None
             
             # Find column indices based on the actual headers
-            # From your table structure: Actions, Date Time, Temperature, Employee Name, Employee ID, Machine Name
             action_idx = 0      # Action / status column
             date_time_idx = 1   # Date Time is the second column (index 1)
             emp_id_idx = 4      # Employee ID is the fifth column (index 4)
@@ -523,6 +719,7 @@ class NIAAttendanceMonitor:
         except Exception as e:
             logging.error(f"Error analyzing attendance: {e}")
             return None   
+    
     def save_attendance_record(self, attendance_data):
         """Save attendance data to a local JSON file"""
         try:
@@ -555,68 +752,34 @@ class NIAAttendanceMonitor:
         return hasher.hexdigest()
 
     def monitor_attendance(self, employee_id, password, interval_seconds=300, max_checks=None):
-            logging.info("Starting continuous monitoring (interval: %s seconds)", interval_seconds)
-            checks = 0
-            driver = None
-            last_hash = None
+        logging.info("Starting continuous monitoring (interval: %s seconds)", interval_seconds)
+        checks = 0
+        
+        try:
+            while True:
+                attendance_data = self.get_attendance_data(employee_id, password)
+                
+                if attendance_data:
+                    analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
+                    if analysis:
+                        self.save_attendance_record(analysis)
+                else:
+                    logging.warning("No attendance data retrieved this cycle.")
 
-            try:
-                attendance_data, driver = self.get_attendance_data(
-                    employee_id,
-                    password,
-                    driver=None,
-                    reuse_driver=True
-                )
+                checks += 1
+                if max_checks and checks >= max_checks:
+                    logging.info("Reached max checks limit (%s). Stopping monitor.", max_checks)
+                    break
 
-                if driver is None:
-                    logging.error("Failed to initialize Selenium driver. Cannot start monitoring.")
-                    return
-
-                while True:
-                    if attendance_data:
-                        current_hash = self._hash_records(attendance_data['records'])
-                        if last_hash is None:
-                            last_hash = current_hash
-                            logging.info("Initial snapshot captured (%s records)", attendance_data['records_found'])
-                        elif current_hash != last_hash:
-                            logging.info("Detected change in attendance records!")
-                            last_hash = current_hash
-                            if attendance_data['records']:
-                                self.save_as_csv(attendance_data['table_headers'], attendance_data['records'])
-                            analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
-                            if analysis:
-                                self.save_attendance_record(analysis)
-                        else:
-                            logging.debug("No changes detected since last check.")
-                    else:
-                        logging.warning("No attendance data retrieved this cycle.")
-
-                    checks += 1
-                    if max_checks and checks >= max_checks:
-                        logging.info("Reached max checks limit (%s). Stopping monitor.", max_checks)
-                        break
-
-                    logging.debug("Sleeping for %s seconds before next check...", interval_seconds)
-                    time.sleep(interval_seconds)
-
-                    attendance_data, driver = self.get_attendance_data(
-                        employee_id,
-                        password,
-                        driver=driver,
-                        reuse_driver=True
-                    )
-            except KeyboardInterrupt:
-                logging.info("Monitoring interrupted by user.")
-            finally:
-                if driver:
-                    try:
-                        driver.quit()
-                    except Exception:
-                        pass
+                logging.debug("Sleeping for %s seconds before next check...", interval_seconds)
+                time.sleep(interval_seconds)
+                
+        except KeyboardInterrupt:
+            logging.info("Monitoring interrupted by user.")
         
     def one_time_check(self, employee_id, password):
         """Perform a single attendance check with analysis using Selenium"""
-        attendance_data, _ = self.get_attendance_data(employee_id, password)
+        attendance_data = self.get_attendance_data(employee_id, password)
         if attendance_data:
             analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
             if analysis:
@@ -627,17 +790,22 @@ class NIAAttendanceMonitor:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="NIA Attendance Monitor for Android/Termux")
+    config = Config().load()
+    
+    parser = argparse.ArgumentParser(
+        description="NIA Attendance Monitor for Android/Termux",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
     parser.add_argument(
         '--mode',
-        choices=['once', 'monitor'],
-        help='Run once or continuously monitor'
+        choices=['once', 'monitor', 'config'],
+        help='Run once, continuously monitor, or show config'
     )
     parser.add_argument(
         '--interval',
         type=int,
-        default=300,
-        help='Monitoring interval in seconds (default: 300)'
+        default=config['monitor_interval'],
+        help='Monitoring interval in seconds'
     )
     parser.add_argument(
         '--max-checks',
@@ -671,12 +839,48 @@ def main():
         '--password',
         help='Password (can also use NIA_PASSWORD env var; use with caution)'
     )
+    parser.add_argument(
+        '--config-show',
+        action='store_true',
+        help='Show current configuration'
+    )
+    parser.add_argument(
+        '--config-set',
+        nargs=2,
+        action='append',
+        metavar=('KEY', 'VALUE'),
+        help='Set configuration value (e.g., --config-set monitor_interval 600)'
+    )
     args = parser.parse_args()
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    monitor = NIAAttendanceMonitor(headless=not args.show_browser, driver_path=args.driver_path)
+    # Handle configuration commands
+    if args.config_show:
+        console.print("Current configuration:")
+        console.print_json(json.dumps(config, indent=2))
+        return
+    
+    if args.config_set:
+        config_obj = Config()
+        current_config = config_obj.load()
+        for key, value in args.config_set:
+            # Convert value to appropriate type
+            if value.isdigit():
+                value = int(value)
+            elif value.lower() in ('true', 'false'):
+                value = value.lower() == 'true'
+            current_config[key] = value
+        config_obj.save(current_config)
+        console.print("✓ Configuration updated")
+        return
+
+    monitor = NIAAttendanceMonitor(
+        headless=not args.show_browser, 
+        driver_path=args.driver_path,
+        config=config
+    )
     
     # Get credentials securely
     employee_id = args.employee_id or os.environ.get('NIA_EMPLOYEE_ID')
@@ -688,12 +892,13 @@ def main():
         password = getpass.getpass("")
     
     if args.mode:
-        choice = '1' if args.mode == 'once' else '2'
+        choice = '1' if args.mode == 'once' else '2' if args.mode == 'monitor' else '3'
     else:
         console.print("\n[bold]Choose operation:[/bold]")
         console.print("1. One-time attendance check with analysis")
         console.print("2. Start continuous monitoring")
-        choice = Prompt.ask("Enter choice", choices=["1", "2"], default="1")
+        console.print("3. Show configuration")
+        choice = Prompt.ask("Enter choice", choices=["1", "2", "3"], default="1")
     
     if choice == "1":
         result = monitor.one_time_check(employee_id, password)
@@ -728,6 +933,10 @@ def main():
             interval_seconds=args.interval,
             max_checks=args.max_checks
         )
+    
+    elif choice == "3":
+        console.print("Current configuration:")
+        console.print_json(json.dumps(config, indent=2))
     
     else:
         console.print("[bold red]Invalid choice[/bold red]")
