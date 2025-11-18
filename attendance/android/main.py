@@ -1,3 +1,9 @@
+import threading
+import signal
+from rich.live import Live
+from rich.panel import Panel
+from rich.layout import Layout
+from rich.align import Align
 import argparse
 import hashlib
 import json
@@ -775,7 +781,12 @@ class NIAAttendanceMonitor:
             hasher.update(line.encode('utf-8', errors='replace'))
         return hasher.hexdigest()
 
-    def monitor_attendance(self, employee_id, password, interval_seconds=300, max_checks=None):
+    def monitor_attendance(self, employee_id, password, interval_seconds=300, max_checks=None, interactive=False):
+        """Monitor attendance with optional interactive mode"""
+        if interactive:
+            return self.interactive_monitor(employee_id, password, interval_seconds)
+        
+        # Original non-interactive monitoring
         logging.info("Starting continuous monitoring (interval: %s seconds)", interval_seconds)
         checks = 0
         
@@ -825,6 +836,192 @@ class NIAAttendanceMonitor:
                 'attendance_data': attendance_data
             }
         return None
+    def interactive_monitor(self, employee_id, password, interval_seconds=300):
+        """Interactive monitoring with live refresh and manual controls"""
+        console = Console()
+        refresh_event = threading.Event()
+        stop_monitoring = threading.Event()
+        
+        # Handle Ctrl+C gracefully
+        def signal_handler(sig, frame):
+            console.print("\n[yellow]Stopping monitor...[/yellow]")
+            stop_monitoring.set()
+            refresh_event.set()
+        
+        signal.signal(signal.Signal.SIGINT, signal_handler)
+        
+        last_data = None
+        check_count = 0
+        last_check_time = None
+        
+        def create_display(attendance_data, check_count, last_check_time, status="Running"):
+            """Create the live display layout"""
+            layout = Layout()
+            
+            # Header with controls
+            header_text = (
+                f"[bold blue]NIA Attendance Monitor[/bold blue] | "
+                f"Employee: {employee_id} | "
+                f"Checks: {check_count} | "
+                f"Status: [green]{status}[/green]"
+            )
+            if last_check_time:
+                header_text += f" | Last: {last_check_time.strftime('%H:%M:%S')}"
+            
+            header = Panel(
+                Align.center(header_text),
+                style="bold white",
+                title="🔄 Interactive Monitor",
+                title_align="left"
+            )
+            
+            # Main content
+            if attendance_data and 'records' in attendance_data:
+                today_details = self.analyze_attendance_patterns(attendance_data, employee_id)
+                
+                if today_details and today_details.get('today_details'):
+                    # Create table for today's records
+                    table = Table(show_header=True, header_style="bold cyan", expand=True)
+                    table.add_column("Entry #", justify="right", style="white", width=8)
+                    table.add_column("Date & Time", style="green", min_width=20)
+                    table.add_column("Temperature", style="yellow", justify="center", width=12)
+                    table.add_column("Status", style="magenta", justify="center", width=10)
+                    
+                    action_idx = 0
+                    date_time_idx = 1
+                    temp_idx = 2
+                    
+                    for idx, row in enumerate(today_details['today_details'], start=1):
+                        date_time = row[date_time_idx] if len(row) > date_time_idx else "N/A"
+                        temperature = row[temp_idx] if len(row) > temp_idx else "N/A"
+                        status = row[action_idx] if len(row) > action_idx else "N/A"
+                        
+                        # Clean status
+                        if "|" in str(status):
+                            status = str(status).split("|")[0].strip()
+                        
+                        # Style based on status
+                        if "FAILED" in str(status).upper():
+                            row_style = "red"
+                            status_display = "FAILED"
+                        elif "SUCCESS" in str(status).upper():
+                            row_style = "green" 
+                            status_display = "SUCCESS"
+                        else:
+                            row_style = None
+                            status_display = status
+                        
+                        table.add_row(str(idx), date_time, temperature, status_display, style=row_style)
+                    
+                    content = table
+                else:
+                    content = Align.center("[yellow]No records found for today[/yellow]")
+            else:
+                content = Align.center("[red]No data available[/red]")
+            
+            # Controls footer
+            controls_text = (
+                "[bold]Controls:[/bold] "
+                "[green]R[/green] - Refresh now | "
+                "[yellow]S[/yellow] - Save to CSV | "
+                "[red]Q[/red] - Quit"
+            )
+            controls = Panel(Align.center(controls_text), style="dim")
+            
+            layout.split_column(
+                Layout(header, size=3),
+                Layout(content, name="main"),
+                Layout(controls, size=3)
+            )
+            
+            return layout
+        
+        def monitor_worker():
+            """Background worker for monitoring"""
+            nonlocal last_data, check_count, last_check_time
+            
+            while not stop_monitoring.is_set():
+                try:
+                    # Perform attendance check
+                    attendance_data = self.get_attendance_data(employee_id, password)
+                    if attendance_data:
+                        last_data = attendance_data
+                        check_count += 1
+                        last_check_time = datetime.now()
+                        
+                        # Auto-save if changes detected
+                        if attendance_data and attendance_data['records']:
+                            record_objects = [
+                                AttendanceRecord.from_table_row(
+                                    attendance_data['table_headers'], 
+                                    row
+                                ) for row in attendance_data['records']
+                            ]
+                            changes = self.detect_changes(record_objects)
+                            if changes['changes_detected']:
+                                console.print(f"\n[green]📈 Changes detected! {len(changes['new_records'])} new records[/green]")
+                                self.save_as_csv(
+                                    attendance_data['table_headers'],
+                                    attendance_data['records'],
+                                    {'auto_save': True, 'changes': len(changes['new_records'])}
+                                )
+                    
+                    # Wait for next check or manual refresh
+                    refresh_event.wait(timeout=interval_seconds)
+                    refresh_event.clear()
+                    
+                except Exception as e:
+                    console.print(f"\n[red]Error in monitor: {e}[/red]")
+        
+        # Start monitoring thread
+        monitor_thread = threading.Thread(target=monitor_worker, daemon=True)
+        monitor_thread.start()
+        
+        console.print("[green]🚀 Starting interactive monitor...[/green]")
+        console.print("[dim]Press 'h' for help, 'q' to quit[/dim]")
+        
+        # Main interactive loop
+        with Live(create_display(last_data, check_count, last_check_time), refresh_per_second=4) as live:
+            while not stop_monitoring.is_set():
+                try:
+                    # Check for user input
+                    key = console.input(timeout=1)
+                    key = key.lower().strip()
+                    
+                    if key == 'q':
+                        stop_monitoring.set()
+                        refresh_event.set()
+                        break
+                    elif key == 'r':
+                        console.print("\n[yellow]🔄 Manual refresh triggered...[/yellow]")
+                        refresh_event.set()
+                    elif key == 's':
+                        if last_data:
+                            filename = self.save_as_csv(
+                                last_data['table_headers'],
+                                last_data['records'],
+                                {'manual_save': True, 'check_count': check_count}
+                            )
+                            if filename:
+                                console.print(f"\n[green]💾 Saved to {filename}[/green]")
+                        else:
+                            console.print("\n[yellow]No data to save[/yellow]")
+                    elif key == 'h':
+                        console.print("\n[cyan]Help:[/cyan]")
+                        console.print("  [green]R[/green] - Refresh now")
+                        console.print("  [yellow]S[/yellow] - Save current data to CSV")
+                        console.print("  [red]Q[/red] - Quit monitor")
+                        console.print("  [blue]H[/blue] - Show this help")
+                        console.input("\nPress Enter to continue...")
+                    
+                except Exception:
+                    # Timeout is expected, just update display
+                    pass
+                
+                # Update display
+                live.update(create_display(last_data, check_count, last_check_time))
+        
+        console.print("[green]✅ Monitor stopped[/green]")
 
 
 def main():
@@ -888,6 +1085,11 @@ def main():
         action='append',
         metavar=('KEY', 'VALUE'),
         help='Set configuration value (e.g., --config-set monitor_interval 600)'
+    )
+    parser.add_argument(
+        '--interactive',
+        action='store_true',
+        help='Use interactive monitor mode with live display'
     )
     args = parser.parse_args()
 
@@ -1035,7 +1237,8 @@ def main():
             employee_id,
             password,
             interval_seconds=args.interval,
-            max_checks=args.max_checks
+            max_checks=args.max_checks,
+            interactive=args.interactive  # Add this
         )
     
     elif choice == "3":
