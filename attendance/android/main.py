@@ -848,7 +848,7 @@ class NIAAttendanceMonitor:
             stop_monitoring.set()
             refresh_event.set()
         
-        signal.signal(signal.Signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
         
         last_data = None
         check_count = 0
