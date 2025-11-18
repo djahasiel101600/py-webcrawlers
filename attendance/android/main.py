@@ -685,7 +685,7 @@ class NIAAttendanceMonitor:
             # Parse dates and analyze patterns
             today = datetime.now().date()
             today_records = []
-            
+
             for record in my_records:
                 if len(record) > date_time_idx:
                     date_str = record[date_time_idx]
@@ -693,17 +693,21 @@ class NIAAttendanceMonitor:
                         # Parse date string like "11/18/2025 12:57:39 PM"
                         # Remove any extra spaces for clean parsing
                         date_str_clean = ' '.join(date_str.split())
-                        record_date = datetime.strptime(date_str_clean, '%m/%d/%Y %I:%M:%S %p').date()
+                        # Extract just the date part (before the time)
+                        date_part = date_str_clean.split()[0]
+                        record_date = datetime.strptime(date_part, '%m/%d/%Y').date()
                         if record_date == today:
                             today_records.append(record)
                     except ValueError as e:
                         logging.debug(f"Date parsing error for '{date_str}': {e}")
-                        # Try alternative format without seconds
+                        # Try to extract date using different methods
                         try:
-                            date_str_clean = ' '.join(date_str.split())
-                            record_date = datetime.strptime(date_str_clean, '%m/%d/%Y %I:%M %p').date()
-                            if record_date == today:
-                                today_records.append(record)
+                            # Look for MM/DD/YYYY pattern
+                            date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', date_str)
+                            if date_match:
+                                record_date = datetime.strptime(date_match.group(1), '%m/%d/%Y').date()
+                                if record_date == today:
+                                    today_records.append(record)
                         except ValueError:
                             logging.warning(f"Could not parse date: {date_str}")
             
@@ -953,7 +957,6 @@ def main():
             attendance_data = result['attendance_data']
             
             console.print(f"[bold]Your records found:[/] {analysis.get('total_records', 0)}")
-            console.print(f"[bold]Total records in system:[/] {analysis.get('total_all_records', 0)}")
             console.print(f"[bold]Today's records:[/] {analysis.get('today_records', 0)}")
             if analysis.get('failed_records', 0) > 0:
                 console.print(f"[bold red]Failed records:[/] {analysis['failed_records']}")
@@ -961,43 +964,40 @@ def main():
             if analysis.get('note'):
                 console.print(f"[yellow]{analysis['note']}[/yellow]")
 
-            # Show ALL your records in the table
-            if attendance_data and 'records' in attendance_data:
-                # Filter to only show records for this employee (with better matching)
-                emp_id_idx = 4  # Employee ID column index
-                all_your_records = []
+            # Show ONLY TODAY'S records in the table
+            today_details = analysis.get('today_details', [])
+            if today_details:
+                table = Table(show_header=True, header_style="bold cyan")
+                headers = attendance_data['table_headers']
+                for header in headers:
+                    table.add_column(header, overflow="fold")
                 
-                for record in attendance_data['records']:
-                    if len(record) > emp_id_idx:
-                        emp_val = record[emp_id_idx]
-                        # Better matching with stripping
-                        if emp_val and str(emp_val).strip() == str(employee_id).strip():
-                            all_your_records.append(record)
+                for idx, row in enumerate(today_details, start=1):
+                    action = row[0] if len(row) > 0 else ""
+                    row_style = "red" if "FAILED" in str(action).upper() else None
+                    table.add_row(str(idx), *[str(cell) for cell in row], style=row_style)
+                console.print(table)
+                console.print(f"[bold]Today's records displayed:[/] {len(today_details)}")
                 
-                if all_your_records:
-                    table = Table(show_header=True, header_style="bold cyan")
-                    headers = attendance_data['table_headers']
-                    for header in headers:
-                        table.add_column(header, overflow="fold")
-                    
-                    for idx, row in enumerate(all_your_records, start=1):
-                        action = row[0] if len(row) > 0 else ""
-                        row_style = "red" if "FAILED" in str(action).upper() else None
-                        table.add_row(str(idx), *[str(cell) for cell in row], style=row_style)
-                    console.print(table)
-                    console.print(f"[bold]Total your records displayed:[/] {len(all_your_records)}")
+                # Show analysis summary
+                if len(today_details) < 2:
+                    console.print("[yellow]⚠️  Only one record today - make sure you have both Time In and Time Out[/yellow]")
+                elif len(today_details) % 2 != 0:
+                    console.print("[yellow]⚠️  Odd number of records - possible missing Time Out[/yellow]")
                 else:
-                    console.print("[yellow]No records found for your employee ID[/yellow]")
-                    # Enhanced debugging
-                    console.print(f"[dim]Your employee ID: '{employee_id}' (type: {type(employee_id)})[/dim]")
-                    emp_ids_in_data = set()
-                    for record in attendance_data['records']:
-                        if len(record) > emp_id_idx and record[emp_id_idx]:
-                            emp_val = record[emp_id_idx]
-                            emp_ids_in_data.add(f"'{emp_val}' (type: {type(emp_val)})")
-                    console.print(f"[dim]Employee IDs found in data: {emp_ids_in_data}[/dim]")
+                    console.print("[green]✓ Good: Even number of records (likely both Time In and Time Out)[/green]")
             else:
-                console.print("[red]No attendance data available[/red]")
+                console.print("[yellow]No records found for today[/yellow]")
+                # Show available dates for context
+                if attendance_data and 'records' in attendance_data:
+                    dates_found = set()
+                    emp_id_idx = 4
+                    for record in attendance_data['records']:
+                        if len(record) > emp_id_idx and str(record[emp_id_idx]).strip() == str(employee_id).strip():
+                            if len(record) > 1:  # Has date field
+                                dates_found.add(record[1].split()[0])  # Get just the date part
+                    if dates_found:
+                        console.print(f"[dim]Your records found on dates: {sorted(dates_found)}[/dim]")
         else:
             console.print("[bold red]One-time check failed![/bold red]")
     
