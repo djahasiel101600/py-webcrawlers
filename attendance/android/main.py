@@ -882,14 +882,21 @@ def main():
         config=config
     )
     
-    # Get credentials securely
-    employee_id = args.employee_id or os.environ.get('NIA_EMPLOYEE_ID')
+    # ==== FIXED CREDENTIALS SECTION ====
+    # Get credentials securely (now checks config file too!)
+    employee_id = (args.employee_id or 
+                   os.environ.get('NIA_EMPLOYEE_ID') or 
+                   config.get('employee_id'))
     if not employee_id:
         employee_id = Prompt.ask("[bold]Enter your Employee ID[/]")
-    password = args.password or os.environ.get('NIA_PASSWORD')
+        
+    password = (args.password or 
+                os.environ.get('NIA_PASSWORD') or 
+                config.get('password'))
     if not password:
         console.print("[bold]Enter your Password[/] (input hidden)")
         password = getpass.getpass("")
+    # ==== END FIX ====
     
     if args.mode:
         choice = '1' if args.mode == 'once' else '2' if args.mode == 'monitor' else '3'
