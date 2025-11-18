@@ -638,7 +638,7 @@ class NIAAttendanceMonitor:
             emp_id_idx = 4      # Employee ID is the fifth column (index 4)
             temp_idx = 2        # Temperature is the third column (index 2)
             
-            # Filter records for this employee and include FAILED entries even if name/ID is missing
+            # Get ALL records for this employee (don't filter by FAILED status)
             my_records = []
             failed_records = []
             for record in records:
@@ -647,20 +647,28 @@ class NIAAttendanceMonitor:
                 action_val = record[action_idx] if len(record) > action_idx else ""
                 emp_val = record[emp_id_idx] if len(record) > emp_id_idx else ""
                 is_for_employee = emp_val == employee_id
-                is_failed = "FAILED" in str(action_val).upper()
                 
-                if is_for_employee or is_failed:
+                # ONLY include records for this employee (remove the FAILED condition)
+                if is_for_employee:
                     my_records.append(record)
-                    if is_failed:
+                    if "FAILED" in str(action_val).upper():
                         failed_records.append(record)
             
             logging.info("ATTENDANCE ANALYSIS FOR EMPLOYEE %s", employee_id)
-            logging.info("Total records found: %s", len(my_records))
+            logging.info("Total YOUR records found: %s", len(my_records))
+            logging.info("Total ALL records in system: %s", len(records))
+            
             if failed_records:
-                logging.warning("Found %s FAILED record(s) in the data", len(failed_records))
+                logging.warning("Found %s FAILED record(s) in your data", len(failed_records))
             
             if not my_records:
                 logging.warning(f"No matching records found for Employee ID: {employee_id}")
+                # Show what employee IDs ARE in the data for debugging
+                emp_ids_in_data = set()
+                for record in records:
+                    if len(record) > emp_id_idx:
+                        emp_ids_in_data.add(record[emp_id_idx])
+                logging.info(f"Employee IDs found in data: {emp_ids_in_data}")
                 return None
             
             # Parse dates and analyze patterns
@@ -688,15 +696,17 @@ class NIAAttendanceMonitor:
                         except ValueError:
                             logging.warning(f"Could not parse date: {date_str}")
             
-            logging.info("Records for today (%s): %s", today, len(today_records))
+            logging.info("YOUR records for today (%s): %s", today, len(today_records))
             
             # Show today's records
             if today_records:
-                logging.info("Today's attendance:")
+                logging.info("Your attendance today:")
                 for record in today_records:
                     time_in_record = record[date_time_idx] if len(record) > date_time_idx else "N/A"
                     temp = record[temp_idx] if len(record) > temp_idx else "N/A"
-                    logging.info(f"  - {time_in_record} (Temp: {temp}°C)")
+                    action = record[action_idx] if len(record) > action_idx else "N/A"
+                    status = "❌ FAILED" if "FAILED" in str(action).upper() else "✅ SUCCESS"
+                    logging.info(f"  - {time_in_record} (Temp: {temp}°C) - {status}")
                 
                 # Check for potential issues
                 if len(today_records) < 2:
@@ -710,15 +720,17 @@ class NIAAttendanceMonitor:
             
             return {
                 'employee_id': employee_id,
-                'total_records': len(my_records),
+                'total_records': len(my_records),  # Only YOUR records
+                'total_all_records': len(records), # All records in system
                 'today_records': len(today_records),
                 'today_details': today_records,
+                'failed_records': len(failed_records),
                 'analysis_timestamp': datetime.now().isoformat()
             }
             
         except Exception as e:
             logging.error(f"Error analyzing attendance: {e}")
-            return None   
+            return None  
     
     def save_attendance_record(self, attendance_data):
         """Save attendance data to a local JSON file"""
@@ -911,25 +923,35 @@ def main():
         result = monitor.one_time_check(employee_id, password)
         if result:
             console.rule("[bold green]CHECK COMPLETED SUCCESSFULLY[/bold green]")
-            if 'today_records' in result:
-                console.print(f"[bold]Today's records:[/] {result['today_records']}")
-            if 'note' in result:
-                console.print(f"[yellow]Note:[/] {result['note']}")
+            console.print(f"[bold]Your records found:[/] {result['total_records']}")
+            console.print(f"[bold]Total records in system:[/] {result['total_all_records']}")
+            console.print(f"[bold]Today's records:[/] {result['today_records']}")
+            if result.get('failed_records', 0) > 0:
+                console.print(f"[bold red]Failed records:[/] {result['failed_records']}")
 
-            today_details = result.get('today_details')
-            if today_details:
+            # Show ALL your records in the table, not just today's
+            all_your_records = []
+            if attendance_data and 'records' in attendance_data:
+                # Filter to only show records for this employee
+                emp_id_idx = 4  # Employee ID column index
+                all_your_records = [
+                    record for record in attendance_data['records'] 
+                    if len(record) > emp_id_idx and record[emp_id_idx] == employee_id
+                ]
+            
+            if all_your_records:
                 table = Table(show_header=True, header_style="bold cyan")
-                table.add_column("Entry #", justify="right")
-                table.add_column("Date & Time", overflow="fold")
-                table.add_column("Temperature")
-                table.add_column("Action / Status", overflow="fold")
-                for idx, row in enumerate(today_details, start=1):
-                    date_time = row[1] if len(row) > 1 else "N/A"
-                    temperature = row[2] if len(row) > 2 else "N/A"
+                headers = attendance_data['table_headers']
+                for header in headers:
+                    table.add_column(header, overflow="fold")
+                
+                for idx, row in enumerate(all_your_records, start=1):
                     action = row[0] if len(row) > 0 else ""
                     row_style = "red" if "FAILED" in str(action).upper() else None
-                    table.add_row(str(idx), date_time, temperature, action, style=row_style)
+                    table.add_row(str(idx), *[str(cell) for cell in row], style=row_style)
                 console.print(table)
+            else:
+                console.print("[yellow]No records found for your employee ID[/yellow]")
         else:
             console.print("[bold red]One-time check failed![/bold red]")
     
