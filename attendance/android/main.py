@@ -796,8 +796,18 @@ class NIAAttendanceMonitor:
             analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
             if analysis:
                 self.save_attendance_record(analysis)
-                return analysis
-            return attendance_data
+                # Return both analysis and raw data
+                return {
+                    'analysis': analysis,
+                    'attendance_data': attendance_data,
+                    'type': 'analysis'
+                }
+            else:
+                # Return raw data when analysis fails
+                return {
+                    'attendance_data': attendance_data,
+                    'type': 'raw_data'
+                }
         return None
 
 
@@ -923,14 +933,22 @@ def main():
         result = monitor.one_time_check(employee_id, password)
         if result:
             console.rule("[bold green]CHECK COMPLETED SUCCESSFULLY[/bold green]")
-            console.print(f"[bold]Your records found:[/] {result['total_records']}")
-            console.print(f"[bold]Total records in system:[/] {result['total_all_records']}")
-            console.print(f"[bold]Today's records:[/] {result['today_records']}")
-            if result.get('failed_records', 0) > 0:
-                console.print(f"[bold red]Failed records:[/] {result['failed_records']}")
+            
+            # Handle both analysis and raw data results
+            if result['type'] == 'analysis':
+                analysis = result['analysis']
+                attendance_data = result['attendance_data']
+                console.print(f"[bold]Your records found:[/] {analysis.get('total_records', 'N/A')}")
+                console.print(f"[bold]Today's records:[/] {analysis.get('today_records', 'N/A')}")
+                if analysis.get('failed_records', 0) > 0:
+                    console.print(f"[bold red]Failed records:[/] {analysis['failed_records']}")
+            else:
+                # Raw data only (analysis failed)
+                attendance_data = result['attendance_data']
+                console.print("[yellow]Analysis failed, showing raw data[/yellow]")
+                console.print(f"[bold]Total records in system:[/] {len(attendance_data.get('records', []))}")
 
-            # Show ALL your records in the table, not just today's
-            all_your_records = []
+            # Show ALL your records in the table
             if attendance_data and 'records' in attendance_data:
                 # Filter to only show records for this employee
                 emp_id_idx = 4  # Employee ID column index
@@ -938,20 +956,29 @@ def main():
                     record for record in attendance_data['records'] 
                     if len(record) > emp_id_idx and record[emp_id_idx] == employee_id
                 ]
-            
-            if all_your_records:
-                table = Table(show_header=True, header_style="bold cyan")
-                headers = attendance_data['table_headers']
-                for header in headers:
-                    table.add_column(header, overflow="fold")
                 
-                for idx, row in enumerate(all_your_records, start=1):
-                    action = row[0] if len(row) > 0 else ""
-                    row_style = "red" if "FAILED" in str(action).upper() else None
-                    table.add_row(str(idx), *[str(cell) for cell in row], style=row_style)
-                console.print(table)
+                if all_your_records:
+                    table = Table(show_header=True, header_style="bold cyan")
+                    headers = attendance_data['table_headers']
+                    for header in headers:
+                        table.add_column(header, overflow="fold")
+                    
+                    for idx, row in enumerate(all_your_records, start=1):
+                        action = row[0] if len(row) > 0 else ""
+                        row_style = "red" if "FAILED" in str(action).upper() else None
+                        table.add_row(str(idx), *[str(cell) for cell in row], style=row_style)
+                    console.print(table)
+                    console.print(f"[bold]Total your records displayed:[/] {len(all_your_records)}")
+                else:
+                    console.print("[yellow]No records found for your employee ID[/yellow]")
+                    # Show what employee IDs ARE available for debugging
+                    emp_ids_in_data = set()
+                    for record in attendance_data['records']:
+                        if len(record) > emp_id_idx and record[emp_id_idx]:
+                            emp_ids_in_data.add(record[emp_id_idx])
+                    console.print(f"[dim]Employee IDs found in data: {emp_ids_in_data}[/dim]")
             else:
-                console.print("[yellow]No records found for your employee ID[/yellow]")
+                console.print("[red]No attendance data available[/red]")
         else:
             console.print("[bold red]One-time check failed![/bold red]")
     
