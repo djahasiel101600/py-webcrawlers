@@ -608,6 +608,14 @@ def main():
         action='store_true',
         help='Save HTML content for debugging'
     )
+    parser.add_argument(
+        '--employee-id',
+        help='Employee ID (can also use NIA_EMPLOYEE_ID env var)'
+    )
+    parser.add_argument(
+        '--password',
+        help='Password (can also use NIA_PASSWORD env var; use with caution)'
+    )
     args = parser.parse_args()
 
     if args.verbose:
@@ -616,8 +624,12 @@ def main():
     monitor = NIAAttendanceMonitor(headless=not args.show_browser, driver_path=args.driver_path)
     
     # Get credentials securely
-    employee_id = input("Enter your Employee ID: ")
-    password = getpass.getpass("Enter your Password: ")
+    employee_id = args.employee_id or os.environ.get('NIA_EMPLOYEE_ID')
+    if not employee_id:
+        employee_id = input("Enter your Employee ID: ")
+    password = args.password or os.environ.get('NIA_PASSWORD')
+    if not password:
+        password = getpass.getpass("Enter your Password: ")
     
     if args.mode:
         choice = '1' if args.mode == 'once' else '2'
