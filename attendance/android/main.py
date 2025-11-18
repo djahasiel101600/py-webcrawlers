@@ -710,10 +710,13 @@ def main():
                 table.add_column("Entry #", justify="right")
                 table.add_column("Date & Time", overflow="fold")
                 table.add_column("Temperature")
+                table.add_column("Action / Status", overflow="fold")
                 for idx, row in enumerate(today_details, start=1):
                     date_time = row[1] if len(row) > 1 else "N/A"
                     temperature = row[2] if len(row) > 2 else "N/A"
-                    table.add_row(str(idx), date_time, temperature)
+                    action = row[0] if len(row) > 0 else ""
+                    row_style = "red" if "FAILED" in str(action).upper() else None
+                    table.add_row(str(idx), date_time, temperature, action, style=row_style)
                 console.print(table)
         else:
             console.print("[bold red]One-time check failed![/bold red]")
