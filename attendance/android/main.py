@@ -35,6 +35,7 @@ class NIAAttendanceMonitor:
     
     def _create_driver(self):
         options = Options()
+        options.add_experimental_option('androidPackage', 'com.android.chrome')
         if self.headless:
             options.add_argument("--headless=new")
         options.add_argument("--disable-gpu")
@@ -42,8 +43,8 @@ class NIAAttendanceMonitor:
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
         options.add_argument("--log-level=3")
-        service = Service(self.driver_path or ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        service = Service(self.driver_path or ChromeDriverManager().install(),)
+        driver = webdriver.Chrome('./chromedriver', options=options)
         driver.set_page_load_timeout(60)
         return driver
 
