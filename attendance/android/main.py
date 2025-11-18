@@ -232,6 +232,10 @@ class NIAAttendanceMonitor:
                     
                 row_data = []
                 for i, cell in enumerate(cells):
+                    action_text = self._format_action_cell(cell)
+                    if action_text:
+                        row_data.append(action_text)
+                        continue
                     if 'sorting_1' in cell.get('class', []):
                         # Handle date time cell with multiple spans
                         date_spans = cell.find_all('span')
@@ -274,6 +278,34 @@ class NIAAttendanceMonitor:
             'total_records_caption': total_records,
             'report_generated_time': generated_time
         }
+    
+    def _format_action_cell(self, cell):
+        """Return enriched text for action cells containing status buttons"""
+        link = cell.find('a')
+        if not link:
+            return None
+        
+        classes = link.get('class', [])
+        label = link.get_text(strip=True) or "Action"
+        status = None
+        if any('btn-danger' in cls for cls in classes):
+            status = 'FAILED'
+        elif any('btn-success' in cls for cls in classes):
+            status = 'SUCCESS'
+        elif any('btn-warning' in cls for cls in classes):
+            status = 'WARNING'
+        
+        href = link.get('href')
+        details = []
+        if status:
+            details.append(status)
+        details.append(label)
+        if href:
+            if href.startswith('/'):
+                href = f"{self.base_url}{href}"
+            details.append(f"Details: {href}")
+        
+        return " | ".join(details)
     
     def _extract_fallback_data(self, soup):
         """Extract data when no table is found"""
