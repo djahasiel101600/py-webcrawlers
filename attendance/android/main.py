@@ -796,18 +796,22 @@ class NIAAttendanceMonitor:
             analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
             if analysis:
                 self.save_attendance_record(analysis)
-                # Return both analysis and raw data
-                return {
-                    'analysis': analysis,
-                    'attendance_data': attendance_data,
-                    'type': 'analysis'
-                }
             else:
-                # Return raw data when analysis fails
-                return {
-                    'attendance_data': attendance_data,
-                    'type': 'raw_data'
+                # Create a basic analysis structure if analysis fails
+                analysis = {
+                    'employee_id': employee_id,
+                    'total_records': 0,
+                    'total_all_records': len(attendance_data.get('records', [])),
+                    'today_records': 0,
+                    'today_details': [],
+                    'failed_records': 0,
+                    'analysis_timestamp': datetime.now().isoformat(),
+                    'note': 'Analysis failed - showing raw data'
                 }
+            return {
+                'analysis': analysis,
+                'attendance_data': attendance_data
+            }
         return None
 
 
@@ -934,19 +938,17 @@ def main():
         if result:
             console.rule("[bold green]CHECK COMPLETED SUCCESSFULLY[/bold green]")
             
-            # Handle both analysis and raw data results
-            if result['type'] == 'analysis':
-                analysis = result['analysis']
-                attendance_data = result['attendance_data']
-                console.print(f"[bold]Your records found:[/] {analysis.get('total_records', 'N/A')}")
-                console.print(f"[bold]Today's records:[/] {analysis.get('today_records', 'N/A')}")
-                if analysis.get('failed_records', 0) > 0:
-                    console.print(f"[bold red]Failed records:[/] {analysis['failed_records']}")
-            else:
-                # Raw data only (analysis failed)
-                attendance_data = result['attendance_data']
-                console.print("[yellow]Analysis failed, showing raw data[/yellow]")
-                console.print(f"[bold]Total records in system:[/] {len(attendance_data.get('records', []))}")
+            analysis = result['analysis']
+            attendance_data = result['attendance_data']
+            
+            console.print(f"[bold]Your records found:[/] {analysis.get('total_records', 0)}")
+            console.print(f"[bold]Total records in system:[/] {analysis.get('total_all_records', 0)}")
+            console.print(f"[bold]Today's records:[/] {analysis.get('today_records', 0)}")
+            if analysis.get('failed_records', 0) > 0:
+                console.print(f"[bold red]Failed records:[/] {analysis['failed_records']}")
+            
+            if analysis.get('note'):
+                console.print(f"[yellow]{analysis['note']}[/yellow]")
 
             # Show ALL your records in the table
             if attendance_data and 'records' in attendance_data:
