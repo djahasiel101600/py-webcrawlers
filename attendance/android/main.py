@@ -81,6 +81,7 @@ class NIAAttendanceMonitor:
         driver.get(f"{self.auth_url}?ReturnUrl={self.base_url}/")
         wait = WebDriverWait(driver, 30)
 
+        # Wait for and fill login form
         employee_input = wait.until(EC.presence_of_element_located((By.NAME, "EmployeeID")))
         password_input = wait.until(EC.presence_of_element_located((By.NAME, "Password")))
 
@@ -89,16 +90,60 @@ class NIAAttendanceMonitor:
         password_input.clear()
         password_input.send_keys(password)
 
-        # Try to click the submit button, fall back to pressing Enter
+        # Take a screenshot before submitting (for debugging)
         try:
-            submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+            driver.save_screenshot("before_login.png")
+        except:
+            pass
+
+        # Submit the form
+        try:
+            submit_btn = driver.find_element(By.CSS_SELECTOR, "input[type='submit']")
             submit_btn.click()
-        except Exception:
+        except Exception as e:
+            logging.debug(f"Could not find submit button: {e}")
+            # Fallback: press Enter on password field
             password_input.submit()
 
-        # Wait for redirect to attendance site with longer timeout
-        wait.until(EC.url_contains(self.base_url))
-        logging.info("✓ Login successful via Selenium")
+        # Wait and check what happens after login
+        try:
+            # Wait up to 20 seconds for something to happen
+            WebDriverWait(driver, 20).until(
+                lambda d: d.current_url != f"{self.auth_url}?ReturnUrl={self.base_url}/"
+            )
+            
+            current_url = driver.current_url
+            logging.debug(f"Current URL after login attempt: {current_url}")
+            
+            # Check if login was successful
+            if self.base_url in current_url:
+                logging.info("✓ Login successful - redirected to attendance system")
+            elif self.auth_url in current_url:
+                # Still on login page - check for errors
+                error_elements = driver.find_elements(By.CSS_SELECTOR, ".field-validation-error, .validation-summary-errors")
+                if error_elements:
+                    error_text = "\n".join([elem.text for elem in error_elements if elem.text])
+                    raise Exception(f"Login failed: {error_text}")
+                else:
+                    raise Exception("Login failed - still on login page but no error message")
+            else:
+                # We're on some other page - might be successful
+                logging.info(f"✓ Login redirected to: {current_url}")
+                
+        except TimeoutException:
+            current_url = driver.current_url
+            logging.debug(f"Final URL after timeout: {current_url}")
+            
+            if self.auth_url in current_url:
+                raise Exception("Login timeout - never left login page")
+            else:
+                logging.info("✓ Login might have succeeded (page changed but timeout occurred)")
+                
+        # Take a screenshot after login attempt (for debugging)
+        try:
+            driver.save_screenshot("after_login.png")
+        except:
+            pass
 
     def _load_attendance_html(self, driver):
         """Load attendance page with specific waiting for the table structure"""
@@ -260,15 +305,26 @@ class NIAAttendanceMonitor:
                 logging.error(f"Unable to start Firefox driver: {e}")
                 logging.info("Make sure Firefox and geckodriver are installed in Termux")
                 return None, None
+            
             try:
                 self._login_with_selenium(driver, employee_id, password)
             except Exception as e:
-                logging.error(f"Login failed during Selenium setup: {e}")
+                logging.error(f"Login failed: {e}")
+                # Save the page HTML for debugging
+                try:
+                    with open("login_debug.html", "w", encoding="utf-8") as f:
+                        f.write(driver.page_source)
+                    logging.info("Saved login page HTML to login_debug.html for inspection")
+                except:
+                    pass
                 if driver:
                     driver.quit()
                 return None, None
 
         try:
+            # Debug: Check current URL before loading attendance
+            logging.debug(f"Current URL before loading attendance: {driver.current_url}")
+            
             html_content = self._load_attendance_html(driver)
             attendance_data = self.parse_attendance_html(html_content)
 
@@ -276,15 +332,17 @@ class NIAAttendanceMonitor:
                 self.save_as_csv(attendance_data['table_headers'], attendance_data['records'])
 
             return attendance_data, driver
+            
         except TimeoutException as e:
             logging.error(f"Selenium timed out while loading the page: {e}")
-            # Try to get whatever HTML we have
+            # Save debug HTML
             try:
-                html_content = driver.page_source
-                attendance_data = self.parse_attendance_html(html_content)
-                return attendance_data, driver
-            except Exception:
-                return None, driver
+                with open("timeout_debug.html", "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                logging.info("Saved timeout page HTML to timeout_debug.html")
+            except:
+                pass
+            return None, driver
         except Exception as e:
             logging.error(f"Error fetching attendance via Selenium: {e}")
             return None, driver
