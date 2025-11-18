@@ -101,7 +101,7 @@ class NIAAttendanceMonitor:
         logging.info("✓ Login successful via Selenium")
 
     def _load_attendance_html(self, driver):
-        """Load attendance page with better error handling and multiple fallbacks"""
+        """Load attendance page with specific waiting for the table structure"""
         logging.debug("Navigating to attendance page...")
         
         try:
@@ -109,78 +109,42 @@ class NIAAttendanceMonitor:
         except TimeoutException:
             logging.warning("Page load timed out, but continuing with current content...")
         
-        wait = WebDriverWait(driver, 45)  # Increased timeout
+        wait = WebDriverWait(driver, 45)
         
-        # Try multiple strategies to find the table or content
+        # Wait specifically for the table and its content
         try:
-            # Strategy 1: Wait for the specific table
+            # Wait for the table to be present
             logging.debug("Waiting for attendance table...")
-            wait.until(EC.presence_of_element_located((By.ID, "DataTables_Table_0")))
-        except TimeoutException:
-            logging.warning("Table with ID 'DataTables_Table_0' not found, trying alternative selectors...")
+            table_element = wait.until(EC.presence_of_element_located((By.ID, "DataTables_Table_0")))
             
-            # Strategy 2: Look for any table that might contain attendance data
-            try:
-                tables = driver.find_elements(By.TAG_NAME, "table")
-                logging.debug(f"Found {len(tables)} tables on page")
-                if tables:
-                    logging.debug("Using first available table")
-                else:
-                    logging.warning("No tables found on page")
-            except Exception as e:
-                logging.warning(f"Error finding tables: {e}")
-        
-        # Wait for any content to load
-        try:
-            # Wait for at least some content to be present
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-            time.sleep(5)  # Extra wait for JavaScript
+            # Wait for rows to be populated in the specific tbody
+            logging.debug("Waiting for table rows to load...")
+            wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "#DataTables_Table_0 #tbody1 tr")) > 0)
             
-            # Check if we have any rows in the table
-            try:
-                rows = driver.find_elements(By.CSS_SELECTOR, "#DataTables_Table_0 tbody tr, table tbody tr")
-                logging.debug(f"Found {len(rows)} rows in table")
-                if not rows:
-                    logging.warning("Table exists but contains no rows")
-            except Exception as e:
-                logging.debug(f"Could not count rows: {e}")
-                
-        except TimeoutException:
-            logging.error("Page content failed to load")
+            # Extra wait for JavaScript to complete rendering
+            time.sleep(3)
+            
+            # Verify we have data
+            rows = driver.find_elements(By.CSS_SELECTOR, "#DataTables_Table_0 #tbody1 tr")
+            logging.info(f"Found {len(rows)} attendance records")
+            
+        except TimeoutException as e:
+            logging.warning(f"Timeout waiting for table content: {e}")
             # Continue anyway to capture whatever HTML we have
-
+        
         html_content = driver.page_source
         logging.debug("Captured attendance page HTML (%s chars)", len(html_content))
         
-        # Debug: Save HTML for inspection
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            with open("debug_page.html", "w", encoding="utf-8") as f:
-                f.write(html_content)
-            logging.debug("Saved page HTML to debug_page.html for inspection")
-        
-        return html_content
+        return html_content    
     
     def parse_attendance_html(self, html_content):
-        """Parse attendance table HTML with multiple fallback strategies"""
+        """Parse attendance table HTML with the exact structure"""
         soup = BeautifulSoup(html_content, 'html.parser')
         
-        # Strategy 1: Look for the specific table ID
+        # Find the specific table
         table = soup.find('table', {'id': 'DataTables_Table_0'})
-        
-        # Strategy 2: If not found, look for any table that might contain attendance data
         if not table:
-            logging.warning("Table with ID 'DataTables_Table_0' not found, searching for any table...")
-            tables = soup.find_all('table')
-            if tables:
-                table = tables[0]  # Use first table found
-                logging.info(f"Using first available table (out of {len(tables)} tables found)")
-            else:
-                logging.error("No tables found on page at all!")
-                # Try to extract any structured data
-                return self._extract_fallback_data(soup)
-        
-        if not table:
-            logging.error("No attendance table found on page")
+            logging.error("No attendance table found with ID 'DataTables_Table_0'")
             return None
 
         # Extract table headers
@@ -189,59 +153,60 @@ class NIAAttendanceMonitor:
         if thead:
             header_row = thead.find('tr')
             if header_row:
-                headers = [th.get_text(strip=True) for th in header_row.find_all(['th', 'td'])]
-        
-        # If no headers in thead, try to get from first row
-        if not headers:
-            first_row = table.find('tr')
-            if first_row:
-                headers = [cell.get_text(strip=True) for cell in first_row.find_all(['th', 'td'])]
+                # Extract text from th elements, handling the nested structure
+                for th in header_row.find_all('th'):
+                    # Get clean text, removing extra whitespace
+                    header_text = th.get_text(strip=True)
+                    # Handle the multi-line headers by taking the main text
+                    if '\n' in header_text:
+                        # Take the first meaningful line
+                        lines = [line.strip() for line in header_text.split('\n') if line.strip()]
+                        header_text = lines[0] if lines else header_text
+                    headers.append(header_text)
 
         logging.debug("Found table headers: %s", headers)
 
-        # Extract table rows
+        # Extract table rows from the specific tbody
         rows = []
-        table_body = table.find('tbody')
+        table_body = table.find('tbody', {'id': 'tbody1'})
+        if not table_body:
+            logging.warning("No tbody with id 'tbody1' found, searching for any tbody")
+            table_body = table.find('tbody')
+        
         if table_body:
             for row in table_body.find_all('tr'):
-                cells = row.find_all(['td', 'th'])
+                cells = row.find_all('td')
                 if not cells:
                     continue
+                    
                 row_data = []
-                for cell in cells:
+                for i, cell in enumerate(cells):
                     if 'sorting_1' in cell.get('class', []):
-                        date_parts = [
-                            span.get_text(strip=True)
-                            for span in cell.find_all('span')
-                            if span.get_text(strip=True)
-                        ]
-                        row_data.append(' '.join(date_parts) if date_parts else cell.get_text(strip=True))
+                        # Handle date time cell with multiple spans
+                        date_spans = cell.find_all('span')
+                        if date_spans:
+                            # Combine all span texts for date time
+                            date_parts = [span.get_text(strip=True) for span in date_spans]
+                            row_data.append(' '.join(date_parts))
+                        else:
+                            row_data.append(cell.get_text(strip=True))
                     else:
+                        # Regular cell - just get text
                         row_data.append(cell.get_text(strip=True))
                 rows.append(row_data)
-        else:
-            # If no tbody, get all rows except header
-            all_rows = table.find_all('tr')
-            if headers and all_rows:
-                all_rows = all_rows[1:]  # Skip header row
-            for row in all_rows:
-                cells = row.find_all(['td', 'th'])
-                if cells:
-                    row_data = [cell.get_text(strip=True) for cell in cells]
-                    rows.append(row_data)
 
         logging.debug("Attendance rows parsed: %s", len(rows))
 
-        # Extract metadata
+        # Extract generated time from tfoot
         generated_time = "Unknown"
-        total_records = "Unknown"
-        
         tfoot = table.find('tfoot')
         if tfoot:
             tfoot_cells = tfoot.find_all('th')
             if len(tfoot_cells) >= 2:
                 generated_time = tfoot_cells[1].get_text(strip=True)
 
+        # Extract total records from caption
+        total_records = "Unknown"
         caption = table.find('caption')
         if caption:
             caption_text = caption.get_text(strip=True)
@@ -258,7 +223,7 @@ class NIAAttendanceMonitor:
             'total_records_caption': total_records,
             'report_generated_time': generated_time
         }
-
+    
     def _extract_fallback_data(self, soup):
         """Extract data when no table is found"""
         logging.warning("Attempting to extract data without table structure...")
@@ -374,15 +339,17 @@ class NIAAttendanceMonitor:
                 logging.warning(f"No records found")
                 return None
             
-            # Find column indices
-            date_time_idx = headers.index('Date Time') if 'Date Time' in headers else 1
-            emp_id_idx = headers.index('Employee ID') if 'Employee ID' in headers else 4
+            # Find column indices based on the actual headers
+            # From your table structure: Actions, Date Time, Temperature, Employee Name, Employee ID, Machine Name
+            date_time_idx = 1  # Date Time is the second column (index 1)
+            emp_id_idx = 4     # Employee ID is the fifth column (index 4)
+            temp_idx = 2       # Temperature is the third column (index 2)
             
             # Filter records for this employee
             my_records = [record for record in records if len(record) > emp_id_idx and record[emp_id_idx] == employee_id]
             
-            logging.debug("ATTENDANCE ANALYSIS FOR EMPLOYEE %s", employee_id)
-            logging.debug("Total records found: %s", len(my_records))
+            logging.info("ATTENDANCE ANALYSIS FOR EMPLOYEE %s", employee_id)
+            logging.info("Total records found: %s", len(my_records))
             
             if not my_records:
                 logging.warning(f"No matching records found for Employee ID: {employee_id}")
@@ -396,19 +363,22 @@ class NIAAttendanceMonitor:
                 if len(record) > date_time_idx:
                     date_str = record[date_time_idx]
                     try:
-                        # Parse date string like "11/17/2025 12:59:09 PM"
-                        record_date = datetime.strptime(date_str, '%m/%d/%Y %I:%M:%S %p').date()
+                        # Parse date string like "11/18/2025 12:57:39 PM"
+                        # Remove any extra spaces for clean parsing
+                        date_str_clean = ' '.join(date_str.split())
+                        record_date = datetime.strptime(date_str_clean, '%m/%d/%Y %I:%M:%S %p').date()
                         if record_date == today:
                             today_records.append(record)
                     except ValueError as e:
                         logging.debug(f"Date parsing error for '{date_str}': {e}")
-                        # Try alternative formats
+                        # Try alternative format without seconds
                         try:
-                            record_date = datetime.strptime(date_str, '%m/%d/%Y %I:%M %p').date()
+                            date_str_clean = ' '.join(date_str.split())
+                            record_date = datetime.strptime(date_str_clean, '%m/%d/%Y %I:%M %p').date()
                             if record_date == today:
                                 today_records.append(record)
                         except ValueError:
-                            pass
+                            logging.warning(f"Could not parse date: {date_str}")
             
             logging.info("Records for today (%s): %s", today, len(today_records))
             
@@ -417,7 +387,7 @@ class NIAAttendanceMonitor:
                 logging.info("Today's attendance:")
                 for record in today_records:
                     time_in_record = record[date_time_idx] if len(record) > date_time_idx else "N/A"
-                    temp = record[2] if len(record) > 2 else "N/A"
+                    temp = record[temp_idx] if len(record) > temp_idx else "N/A"
                     logging.info(f"  - {time_in_record} (Temp: {temp}°C)")
                 
                 # Check for potential issues
@@ -440,8 +410,7 @@ class NIAAttendanceMonitor:
             
         except Exception as e:
             logging.error(f"Error analyzing attendance: {e}")
-            return None
-    
+            return None   
     def save_attendance_record(self, attendance_data):
         """Save attendance data to a local JSON file"""
         try:
