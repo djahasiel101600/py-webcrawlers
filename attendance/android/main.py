@@ -7,7 +7,6 @@ import re
 import time
 import csv
 from datetime import datetime
-
 import getpass
 from bs4 import BeautifulSoup
 from selenium import webdriver
