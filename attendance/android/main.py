@@ -437,15 +437,31 @@ class NIAAttendanceMonitor:
             
             # Find column indices based on the actual headers
             # From your table structure: Actions, Date Time, Temperature, Employee Name, Employee ID, Machine Name
-            date_time_idx = 1  # Date Time is the second column (index 1)
-            emp_id_idx = 4     # Employee ID is the fifth column (index 4)
-            temp_idx = 2       # Temperature is the third column (index 2)
+            action_idx = 0      # Action / status column
+            date_time_idx = 1   # Date Time is the second column (index 1)
+            emp_id_idx = 4      # Employee ID is the fifth column (index 4)
+            temp_idx = 2        # Temperature is the third column (index 2)
             
-            # Filter records for this employee
-            my_records = [record for record in records if len(record) > emp_id_idx and record[emp_id_idx] == employee_id]
+            # Filter records for this employee and include FAILED entries even if name/ID is missing
+            my_records = []
+            failed_records = []
+            for record in records:
+                if len(record) <= max(action_idx, emp_id_idx):
+                    continue
+                action_val = record[action_idx] if len(record) > action_idx else ""
+                emp_val = record[emp_id_idx] if len(record) > emp_id_idx else ""
+                is_for_employee = emp_val == employee_id
+                is_failed = "FAILED" in str(action_val).upper()
+                
+                if is_for_employee or is_failed:
+                    my_records.append(record)
+                    if is_failed:
+                        failed_records.append(record)
             
             logging.info("ATTENDANCE ANALYSIS FOR EMPLOYEE %s", employee_id)
             logging.info("Total records found: %s", len(my_records))
+            if failed_records:
+                logging.warning("Found %s FAILED record(s) in the data", len(failed_records))
             
             if not my_records:
                 logging.warning(f"No matching records found for Employee ID: {employee_id}")
