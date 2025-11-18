@@ -1,41 +1,59 @@
-# test_chromedriver.py
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-import logging
+#!/usr/bin/env python3
+import requests
+from requests_html import HTMLSession
+import time
+from urllib.parse import urljoin, urlparse
+import json
 
-logging.basicConfig(level=logging.INFO)
+class SimpleAndroidCrawler:
+    def __init__(self):
+        self.session = HTMLSession()
+        self.visited = set()
+        
+    def crawl(self, url, max_pages=10):
+        """Simple crawler with JavaScript support"""
+        if url in self.visited or len(self.visited) >= max_pages:
+            return
+        
+        print(f"Crawling: {url}")
+        self.visited.add(url)
+        
+        try:
+            # Get page with JavaScript rendering
+            response = self.session.get(url)
+            response.html.render(timeout=20, sleep=2)
+            
+            # Extract data
+            title = response.html.find('title', first=True)
+            title_text = title.text if title else "No title"
+            
+            print(f"Title: {title_text}")
+            print(f"URL: {response.url}")
+            print("-" * 50)
+            
+            # Find and follow links
+            links = response.html.absolute_links
+            for link in list(links)[:5]:  # Limit to 5 links per page
+                if self.is_valid_url(link) and len(self.visited) < max_pages:
+                    time.sleep(1)  Be polite
+                    self.crawl(link, max_pages)
+                    
+        except Exception as e:
+            print(f"Error: {e}")
+    
+    def is_valid_url(self, url):
+        """Validate URL"""
+        parsed = urlparse(url)
+        return (parsed.scheme in ['http', 'https'] and 
+                parsed.netloc and 
+                url not in self.visited)
 
-def test_chromedriver():
-    try:
-        options = Options()
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--window-size=1280,720")
-        
-        # Set Chromium binary (install if not present)
-        options.binary_location = "/usr/bin/chromium-browser"
-        
-        # Use the ChromeDriver we found
-        service = Service("/usr/local/bin/chromedriver")
-        
-        print("Starting ChromeDriver test...")
-        driver = webdriver.Chrome(service=service, options=options)
-        
-        print("Opening test page...")
-        driver.get("https://httpbin.org/html")
-        
-        print(f"Page title: {driver.title}")
-        print("✓ ChromeDriver test successful!")
-        
-        driver.quit()
-        return True
-        
-    except Exception as e:
-        print(f"❌ ChromeDriver test failed: {e}")
-        return False
-
+# Usage
 if __name__ == "__main__":
-    test_chromedriver()
+    crawler = SimpleAndroidCrawler()
+    start_url = input("Enter URL to crawl: ").strip() or "https://example.com"
+    crawler.crawl(start_url, max_pages=10)
+    
+    print(f"\nCrawled {len(crawler.visited)} pages:")
+    for url in crawler.visited:
+        print(f" - {url}")
