@@ -1,19 +1,14 @@
-#!/data/data/com.termux/files/usr/bin/bash
+# Install Firefox in Termux
+pkg update && pkg upgrade
+pkg install python firefox
+pip install selenium beautifulsoup4
 
-echo "Setting up web crawler for Termux..."
+# Download geckodriver for Android
+# You'll need to download the appropriate ARM64 version
+wget https://github.com/mozilla/geckodriver/releases/download/v0.34.0/geckodriver-v0.34.0-linux-aarch64.tar.gz
+tar -xzf geckodriver-v0.34.0-linux-aarch64.tar.gz
+chmod +x geckodriver
+mv geckodriver /data/data/com.termux/files/usr/bin/
 
-# Update packages
-pkg update && pkg upgrade -y
-
-# Install required packages
-pkg install -y python chromium
-
-# Install Python packages
-pip install selenium beautifulsoup4 requests requests_html
-
-# Create crawler directory
-mkdir -p ~/web-crawler
-cd ~/web-crawler
-
-echo "Setup complete!"
-echo "Run: python android_crawler.py"
+# Run your script
+python your_script.py --driver-path /data/data/com.termux/files/usr/bin/geckodriver
