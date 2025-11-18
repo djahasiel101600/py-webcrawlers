@@ -12,12 +12,12 @@ import getpass
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException, WebDriverException
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.firefox.options import Options
+from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.firefox import GeckoDriverManager
 
 # Set up logging
 logging.basicConfig(
@@ -35,7 +35,6 @@ class NIAAttendanceMonitor:
     
     def _create_driver(self):
         options = Options()
-        options.add_experimental_option('androidPackage', 'com.android.chrome')
         if self.headless:
             options.add_argument("--headless=new")
         options.add_argument("--disable-gpu")
@@ -43,8 +42,8 @@ class NIAAttendanceMonitor:
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
         options.add_argument("--log-level=3")
-        service = Service(self.driver_path or ChromeDriverManager().install(),)
-        driver = webdriver.Chrome('./chromedriver', options=options)
+        service = Service(self.driver_path or ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(60)
         return driver
 
