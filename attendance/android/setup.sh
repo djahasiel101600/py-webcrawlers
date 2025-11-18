@@ -1,7 +1,7 @@
 # Install Firefox in Termux
 pkg update && pkg upgrade
 pkg install python firefox
-pip install selenium beautifulsoup4
+pip install selenium beautifulsoup4 rich
 
 # Download geckodriver for Android
 # You'll need to download the appropriate ARM64 version

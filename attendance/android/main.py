@@ -16,12 +16,19 @@ from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from rich.console import Console
+from rich.prompt import Prompt
+from rich.table import Table
+from rich.logging import RichHandler
 
-# Set up logging
+console = Console()
+
+# Set up logging with Rich handler for nicer console output
 logging.basicConfig(
     level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s: %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format="%(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[RichHandler(console=console, rich_tracebacks=True, markup=True)]
 )
 
 class NIAAttendanceMonitor:
@@ -626,30 +633,42 @@ def main():
     # Get credentials securely
     employee_id = args.employee_id or os.environ.get('NIA_EMPLOYEE_ID')
     if not employee_id:
-        employee_id = input("Enter your Employee ID: ")
+        employee_id = Prompt.ask("[bold]Enter your Employee ID[/]")
     password = args.password or os.environ.get('NIA_PASSWORD')
     if not password:
-        password = getpass.getpass("Enter your Password: ")
+        console.print("[bold]Enter your Password[/] (input hidden)")
+        password = getpass.getpass("")
     
     if args.mode:
         choice = '1' if args.mode == 'once' else '2'
     else:
-        print("\nChoose operation:")
-        print("1. One-time attendance check with analysis")
-        print("2. Start continuous monitoring")
-        choice = input("Enter choice (1 or 2): ").strip()
+        console.print("\n[bold]Choose operation:[/bold]")
+        console.print("1. One-time attendance check with analysis")
+        console.print("2. Start continuous monitoring")
+        choice = Prompt.ask("Enter choice", choices=["1", "2"], default="1")
     
     if choice == "1":
         result = monitor.one_time_check(employee_id, password)
         if result:
-            print("\n" + "="*50)
-            print("CHECK COMPLETED SUCCESSFULLY!")
+            console.rule("[bold green]CHECK COMPLETED SUCCESSFULLY[/bold green]")
             if 'today_records' in result:
-                print(f"Today's records: {result['today_records']}")
+                console.print(f"[bold]Today's records:[/] {result['today_records']}")
             if 'note' in result:
-                print(f"Note: {result['note']}")
+                console.print(f"[yellow]Note:[/] {result['note']}")
+
+            today_details = result.get('today_details')
+            if today_details:
+                table = Table(show_header=True, header_style="bold cyan")
+                table.add_column("Entry #", justify="right")
+                table.add_column("Date & Time", overflow="fold")
+                table.add_column("Temperature")
+                for idx, row in enumerate(today_details, start=1):
+                    date_time = row[1] if len(row) > 1 else "N/A"
+                    temperature = row[2] if len(row) > 2 else "N/A"
+                    table.add_row(str(idx), date_time, temperature)
+                console.print(table)
         else:
-            print("One-time check failed!")
+            console.print("[bold red]One-time check failed![/bold red]")
     
     elif choice == "2":
         monitor.monitor_attendance(
@@ -660,7 +679,7 @@ def main():
         )
     
     else:
-        print("Invalid choice")
+        console.print("[bold red]Invalid choice[/bold red]")
 
 if __name__ == "__main__":
     main()
