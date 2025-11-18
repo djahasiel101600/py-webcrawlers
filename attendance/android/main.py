@@ -1,9 +1,7 @@
 import argparse
-import hashlib
 import json
 import logging
 import os
-import re
 import time
 from datetime import datetime
 import getpass
@@ -11,11 +9,11 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import subprocess
-import sys
 
 # Set up logging
 logging.basicConfig(
@@ -30,82 +28,143 @@ class NIAAttendanceMonitor:
         self.auth_url = "https://accounts.nia.gov.ph/Account/Login"
         self.headless = headless
     
-    def _find_chrome_in_termux(self):
-        """Find Chrome executable in Termux"""
+    def _find_chromium_binary(self):
+        """Find Chromium binary in Ubuntu"""
         possible_paths = [
-            '/data/data/com.termux/files/usr/bin/chrome',
-            '/data/data/com.termux/files/usr/bin/chromium',
-            '/data/data/com.termux/files/usr/bin/chromium-browser',
-            subprocess.getoutput('which chromium'),
-            subprocess.getoutput('which chromium-browser'),
-            subprocess.getoutput('which chrome')
+            '/usr/bin/chromium-browser',
+            '/usr/bin/chromium',
+            '/snap/bin/chromium'
         ]
         
         for path in possible_paths:
-            if path and os.path.exists(path):
-                logging.info(f"Found Chrome at: {path}")
+            if os.path.exists(path):
+                logging.info(f"Found Chromium at: {path}")
                 return path
         
-        # If not found, try to install it
-        logging.info("Chrome not found. Installing chromium...")
-        result = subprocess.run(['pkg', 'install', 'chromium', '-y'], 
-                              capture_output=True, text=True)
-        if result.returncode == 0:
-            chrome_path = subprocess.getoutput('which chromium')
-            if chrome_path:
-                return chrome_path
+        # Try which command
+        try:
+            result = subprocess.run(['which', 'chromium-browser'], 
+                                  capture_output=True, text=True)
+            if result.stdout.strip():
+                return result.stdout.strip()
+        except:
+            pass
         
-        logging.error("Could not find or install Chrome in Termux")
+        logging.error("Chromium not found. Please install chromium-browser")
         return None
 
-    def _create_driver_termux(self):
-        """Create Chrome driver optimized for Termux"""
-        chrome_path = self._find_chrome_in_termux()
-        if not chrome_path:
-            raise Exception("Chrome not available in Termux")
+    def _find_chromedriver(self):
+        """Find ChromeDriver"""
+        possible_paths = [
+            '/usr/local/bin/chromedriver',
+            '/usr/bin/chromedriver'
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                logging.info(f"Found ChromeDriver at: {path}")
+                return path
+        
+        # Try which command
+        try:
+            result = subprocess.run(['which', 'chromedriver'], 
+                                  capture_output=True, text=True)
+            if result.stdout.strip():
+                return result.stdout.strip()
+        except:
+            pass
+        
+        # Last resort: try to download it
+        return self._download_chromedriver()
+
+    def _download_chromedriver(self):
+        """Download ChromeDriver if not found"""
+        try:
+            logging.info("Downloading ChromeDriver...")
+            import requests
+            import zipfile
+            
+            # Download ChromeDriver for ARM64
+            url = "https://storage.googleapis.com/chrome-for-testing-public/120.0.6099.109/linux64/chromedriver-linux64.zip"
+            local_path = "/tmp/chromedriver.zip"
+            
+            # Download
+            response = requests.get(url)
+            with open(local_path, 'wb') as f:
+                f.write(response.content)
+            
+            # Extract
+            with zipfile.ZipFile(local_path, 'r') as zip_ref:
+                zip_ref.extractall("/tmp/")
+            
+            # Move to bin
+            os.system("mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/")
+            os.system("chmod +x /usr/local/bin/chromedriver")
+            
+            logging.info("ChromeDriver downloaded successfully")
+            return "/usr/local/bin/chromedriver"
+            
+        except Exception as e:
+            logging.error(f"Failed to download ChromeDriver: {e}")
+            return None
+
+    def _create_driver_ubuntu(self):
+        """Create Chromium driver for Ubuntu in proot-distro"""
+        chromium_path = self._find_chromium_binary()
+        chromedriver_path = self._find_chromedriver()
+        
+        if not chromium_path:
+            raise Exception("Chromium not found. Run: apt install chromium-browser")
         
         options = Options()
         
         if self.headless:
             options.add_argument("--headless=new")
         
-        # Essential options for Termux/Android
-        options.add_argument("--disable-gpu")
+        # Essential options for proot-distro environment
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--remote-debugging-port=9222")
-        options.add_argument("--disable-features=VizDisplayCompositor")
-        options.add_argument("--disable-background-timer-throttling")
-        options.add_argument("--disable-backgrounding-occluded-windows")
-        options.add_argument("--disable-renderer-backgrounding")
+        options.add_argument("--disable-gpu")
         options.add_argument("--window-size=1280,720")
+        options.add_argument("--remote-debugging-port=9222")
         
         # Performance optimizations
         options.add_argument("--disable-extensions")
         options.add_argument("--disable-plugins")
         options.add_argument("--disable-translate")
-        options.add_argument("--disable-default-apps")
-        options.add_argument("--disable-features=TranslateUI")
-        options.add_argument("--disable-ipc-flooding-protection")
         
-        # Set binary location
-        options.binary_location = chrome_path
+        # Set Chromium binary location
+        options.binary_location = chromium_path
         
         try:
-            # Use Chrome in portable mode
-            driver = webdriver.Chrome(options=options)
+            logging.info(f"Using Chromium: {chromium_path}")
+            
+            if chromedriver_path:
+                logging.info(f"Using ChromeDriver: {chromedriver_path}")
+                service = Service(chromedriver_path)
+                driver = webdriver.Chrome(service=service, options=options)
+            else:
+                logging.warning("ChromeDriver not found, trying without service")
+                driver = webdriver.Chrome(options=options)
+            
             driver.set_page_load_timeout(45)
             driver.implicitly_wait(10)
+            
+            logging.info("✓ Chromium driver created successfully")
             return driver
+            
         except Exception as e:
-            logging.error(f"Failed to create Chrome driver: {e}")
-            # Fallback: try without specifying binary
+            logging.error(f"Failed to create Chromium driver: {e}")
+            
+            # Try alternative approach
             try:
-                driver = webdriver.Chrome(options=options)
-                driver.set_page_load_timeout(45)
+                logging.info("Trying alternative approach...")
+                from selenium.webdriver.chrome.service import Service as ChromeService
+                service = ChromeService()
+                driver = webdriver.Chrome(service=service, options=options)
                 return driver
             except Exception as e2:
-                logging.error(f"Fallback also failed: {e2}")
+                logging.error(f"Alternative approach failed: {e2}")
                 raise
 
     def _login_with_selenium(self, driver, employee_id, password):
@@ -116,17 +175,17 @@ class NIAAttendanceMonitor:
             
             wait = WebDriverWait(driver, 30)
             
-            # Wait for and fill employee ID
+            # Wait for login form elements
             employee_input = wait.until(
                 EC.presence_of_element_located((By.NAME, "EmployeeID"))
             )
-            employee_input.clear()
-            employee_input.send_keys(employee_id)
-            
-            # Wait for and fill password
             password_input = wait.until(
                 EC.presence_of_element_located((By.NAME, "Password"))
             )
+            
+            # Fill credentials
+            employee_input.clear()
+            employee_input.send_keys(employee_id)
             password_input.clear()
             password_input.send_keys(password)
             
@@ -137,7 +196,7 @@ class NIAAttendanceMonitor:
                 )
                 submit_btn.click()
             except:
-                # Fallback: press Enter on password field
+                # Fallback: press Enter
                 from selenium.webdriver.common.keys import Keys
                 password_input.send_keys(Keys.RETURN)
             
@@ -145,56 +204,62 @@ class NIAAttendanceMonitor:
             wait.until(EC.url_contains(self.base_url))
             logging.info("✓ Login successful")
             
-            # Additional wait for page to fully load
+            # Additional wait for page stability
             time.sleep(3)
             return True
             
         except Exception as e:
             logging.error(f"Login failed: {e}")
-            # Save screenshot for debugging
+            
+            # Save screenshot and page source for debugging
             try:
                 driver.save_screenshot("login_error.png")
-                logging.info("Saved screenshot as login_error.png")
+                with open("login_page.html", "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                logging.info("Saved debug files: login_error.png, login_page.html")
             except:
                 pass
             return False
 
     def _load_attendance_data(self, driver):
-        """Load attendance page and extract data"""
+        """Load and extract attendance data"""
         try:
             logging.info("Navigating to attendance page...")
             driver.get(f"{self.base_url}/Attendance")
             
             wait = WebDriverWait(driver, 30)
             
-            # Wait for the data table to load
+            # Wait for the data table
             wait.until(
                 EC.presence_of_element_located((By.ID, "DataTables_Table_0"))
             )
             
-            # Wait for data to populate (JavaScript rendering)
+            # Wait extra time for JavaScript to populate data
+            logging.info("Waiting for data to load...")
             time.sleep(5)
             
-            # Check if table has rows
+            # Check if we have data rows
             rows = driver.find_elements(By.CSS_SELECTOR, "#DataTables_Table_0 tbody tr")
+            logging.info(f"Found {len(rows)} rows in table")
+            
             if not rows:
-                logging.warning("Table loaded but no rows found. Waiting longer...")
+                logging.warning("No rows found. Waiting longer...")
                 time.sleep(5)
                 rows = driver.find_elements(By.CSS_SELECTOR, "#DataTables_Table_0 tbody tr")
+                logging.info(f"After extra wait: {len(rows)} rows")
             
-            logging.info(f"Found {len(rows)} attendance records")
-            
-            # Get page source and parse
+            # Get the page source
             html_content = driver.page_source
             return self.parse_attendance_html(html_content)
             
         except Exception as e:
             logging.error(f"Error loading attendance data: {e}")
-            # Save page source for debugging
+            
+            # Save page for debugging
             try:
-                with open("debug_page.html", "w", encoding="utf-8") as f:
+                with open("attendance_page_debug.html", "w", encoding="utf-8") as f:
                     f.write(driver.page_source)
-                logging.info("Saved page source as debug_page.html")
+                logging.info("Saved page source as attendance_page_debug.html")
             except:
                 pass
             return None
@@ -203,13 +268,22 @@ class NIAAttendanceMonitor:
         """Main method to get attendance data"""
         driver = None
         try:
-            driver = self._create_driver_termux()
+            driver = self._create_driver_ubuntu()
+            
             if self._login_with_selenium(driver, employee_id, password):
                 attendance_data = self._load_attendance_data(driver)
+                
                 if attendance_data and attendance_data['records']:
                     self.save_as_csv(attendance_data['table_headers'], attendance_data['records'])
+                    logging.info("✓ Attendance data retrieved successfully")
+                else:
+                    logging.warning("No attendance data found")
+                
                 return attendance_data
-            return None
+            else:
+                logging.error("Login failed")
+                return None
+                
         except Exception as e:
             logging.error(f"Error in get_attendance_data: {e}")
             return None
@@ -217,24 +291,39 @@ class NIAAttendanceMonitor:
             if driver:
                 try:
                     driver.quit()
+                    logging.info("Browser closed")
                 except:
                     pass
 
     def parse_attendance_html(self, html_content):
-        """Parse the attendance table from HTML"""
+        """Parse attendance table from HTML"""
         soup = BeautifulSoup(html_content, 'html.parser')
         
         # Find the main table
         table = soup.find('table', {'id': 'DataTables_Table_0'})
         if not table:
-            logging.error("Could not find attendance table")
-            return None
+            logging.error("Could not find attendance table with id 'DataTables_Table_0'")
+            
+            # Try to find any table
+            tables = soup.find_all('table')
+            if tables:
+                table = tables[0]
+                logging.warning("Using first table found (may not be correct)")
+            else:
+                logging.error("No tables found on page")
+                return None
 
         # Extract headers
         headers = []
-        header_row = table.find('thead').find('tr') if table.find('thead') else None
-        if header_row:
-            headers = [th.get_text(strip=True) for th in header_row.find_all(['th', 'td'])]
+        thead = table.find('thead')
+        if thead:
+            header_row = thead.find('tr')
+            if header_row:
+                headers = [th.get_text(strip=True) for th in header_row.find_all(['th', 'td'])]
+
+        if not headers:
+            logging.warning("No headers found, using default")
+            headers = ['Column_' + str(i) for i in range(10)]
 
         # Extract data rows
         rows = []
@@ -259,133 +348,61 @@ class NIAAttendanceMonitor:
         }
 
     def save_as_csv(self, headers, rows):
-        """Save data to CSV"""
+        """Save data to CSV file"""
         try:
             if not rows:
                 logging.warning("No data to save")
                 return
             
+            # Create DataFrame
             df = pd.DataFrame(rows, columns=headers)
-            filename = f"attendance_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
-            df.to_csv(filename, index=False)
+            
+            # Generate filename
+            filename = f"attendance_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            
+            # Save to CSV
+            df.to_csv(filename, index=False, encoding='utf-8')
             logging.info(f"✓ Saved {len(rows)} records to {filename}")
             
             # Show preview
-            print("\nRecent records:")
-            print(df.head().to_string(index=False))
+            print("\n" + "="*50)
+            print("RECENT ATTENDANCE RECORDS:")
+            print("="*50)
+            print(df.head(10).to_string(index=False))
+            print("="*50)
             
         except Exception as e:
             logging.error(f"Error saving CSV: {e}")
 
-    def analyze_attendance_patterns(self, attendance_data, employee_id):
-        """Analyze attendance patterns"""
-        if not attendance_data:
-            return None
-            
-        try:
-            headers = attendance_data['table_headers']
-            records = attendance_data['records']
-            
-            if not records:
-                logging.warning("No records to analyze")
-                return None
-
-            # Find relevant columns
-            date_idx = next((i for i, h in enumerate(headers) if 'date' in h.lower()), 1)
-            emp_id_idx = next((i for i, h in enumerate(headers) if 'employee' in h.lower() and 'id' in h.lower()), 4)
-            
-            # Filter user's records
-            user_records = [r for r in records if len(r) > emp_id_idx and r[emp_id_idx] == employee_id]
-            
-            # Analyze today's records
-            today = datetime.now().date()
-            today_records = []
-            
-            for record in user_records:
-                if len(record) > date_idx:
-                    date_str = record[date_idx]
-                    try:
-                        record_date = datetime.strptime(date_str, '%m/%d/%Y %I:%M:%S %p').date()
-                        if record_date == today:
-                            today_records.append(record)
-                    except ValueError:
-                        try:
-                            record_date = datetime.strptime(date_str, '%m/%d/%Y %I:%M %p').date()
-                            if record_date == today:
-                                today_records.append(record)
-                        except ValueError:
-                            continue
-
-            logging.info(f"Today's records: {len(today_records)}")
-            
-            if today_records:
-                for record in today_records:
-                    logging.info(f"  - {record[date_idx]}")
-                
-                if len(today_records) < 2:
-                    logging.warning("⚠️  Only one record today - check Time In/Out")
-                elif len(today_records) % 2 != 0:
-                    logging.warning("⚠️  Odd number of records - possible missing Time Out")
-
-            return {
-                'employee_id': employee_id,
-                'total_records': len(user_records),
-                'today_records': len(today_records),
-                'analysis_timestamp': datetime.now().isoformat()
-            }
-            
-        except Exception as e:
-            logging.error(f"Analysis error: {e}")
-            return None
-
-    def monitor_attendance(self, employee_id, password, interval=300, max_checks=None):
-        """Continuous monitoring"""
-        logging.info(f"Starting monitor (interval: {interval}s)")
-        checks = 0
-        
-        try:
-            while True:
-                if max_checks and checks >= max_checks:
-                    break
-                    
-                data = self.get_attendance_data(employee_id, password)
-                if data:
-                    self.analyze_attendance_patterns(data, employee_id)
-                
-                checks += 1
-                logging.info(f"Check {checks} completed. Waiting {interval} seconds...")
-                time.sleep(interval)
-                
-        except KeyboardInterrupt:
-            logging.info("Monitoring stopped")
-
 def main():
-    parser = argparse.ArgumentParser(description="NIA Attendance Monitor - Termux Version")
-    parser.add_argument('--mode', choices=['once', 'monitor'], help='Run mode')
-    parser.add_argument('--interval', type=int, default=300, help='Monitor interval')
-    parser.add_argument('--visible', action='store_true', help='Show browser window')
-    parser.add_argument('--verbose', action='store_true', help='Verbose logging')
+    parser = argparse.ArgumentParser(description="NIA Attendance Monitor - Ubuntu Termux")
+    parser.add_argument('--visible', action='store_true', help='Show browser window (not headless)')
+    parser.add_argument('--verbose', action='store_true', help='Enable debug logging')
     
     args = parser.parse_args()
     
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
     
+    print("NIA Attendance Monitor - Ubuntu Termux Edition")
+    print("="*50)
+    
+    # Get credentials
+    employee_id = input("Enter your Employee ID: ")
+    password = getpass.getpass("Enter your Password: ")
+    
+    # Create monitor instance
     monitor = NIAAttendanceMonitor(headless=not args.visible)
     
-    print("NIA Attendance Monitor - Termux Edition")
-    employee_id = input("Employee ID: ")
-    password = getpass.getpass("Password: ")
+    print("\nStarting attendance check...")
+    data = monitor.get_attendance_data(employee_id, password)
     
-    if args.mode == 'monitor':
-        monitor.monitor_attendance(employee_id, password, args.interval)
+    if data:
+        print("\n✅ SUCCESS: Attendance data retrieved successfully!")
+        print(f"📊 Records found: {data['records_found']}")
     else:
-        data = monitor.get_attendance_data(employee_id, password)
-        if data:
-            monitor.analyze_attendance_patterns(data, employee_id)
-            print("✓ Check completed successfully!")
-        else:
-            print("❌ Failed to retrieve data")
+        print("\n❌ FAILED: Could not retrieve attendance data")
+        print("Check the debug files for more information")
 
 if __name__ == "__main__":
     main()
