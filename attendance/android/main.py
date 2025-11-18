@@ -1,13 +1,3 @@
-import argparse
-import hashlib
-import json
-import logging
-import os
-import re
-import time
-import csv
-from datetime import datetime
-
 import getpass
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -329,9 +319,7 @@ class NIAAttendanceMonitor:
                     driver.quit()
                 except Exception:
                     pass
-
-    # ... keep the rest of your methods the same (save_as_csv, analyze_attendance_patterns, etc.)
-
+    # Replace the save_as_csv method with this:
     def save_as_csv(self, headers, rows):
         """Save attendance data as CSV file using built-in csv module"""
         try:
@@ -360,9 +348,192 @@ class NIAAttendanceMonitor:
             logging.debug("Total records: %s", len(rows))
 
         except Exception as e:
-            logging.error(f"Error saving CSV: {e}")
+            logging.error(f"Error saving CSV: {e}")  
+    
+    def analyze_attendance_patterns(self, attendance_data, employee_id):
+        """Analyze attendance patterns and detect potential issues"""
+        try:
+            if not attendance_data or 'records' not in attendance_data:
+                logging.warning("No attendance data to analyze")
+                return None
+            
+            headers = attendance_data['table_headers']
+            records = attendance_data['records']
+            
+            if not records:
+                logging.warning(f"No records found")
+                return None
+            
+            # Find column indices
+            date_time_idx = headers.index('Date Time') if 'Date Time' in headers else 1
+            emp_id_idx = headers.index('Employee ID') if 'Employee ID' in headers else 4
+            
+            # Filter records for this employee
+            my_records = [record for record in records if len(record) > emp_id_idx and record[emp_id_idx] == employee_id]
+            
+            logging.debug("ATTENDANCE ANALYSIS FOR EMPLOYEE %s", employee_id)
+            logging.debug("Total records found: %s", len(my_records))
+            
+            if not my_records:
+                logging.warning(f"No matching records found for Employee ID: {employee_id}")
+                return None
+            
+            # Parse dates and analyze patterns
+            today = datetime.now().date()
+            today_records = []
+            
+            for record in my_records:
+                if len(record) > date_time_idx:
+                    date_str = record[date_time_idx]
+                    try:
+                        # Parse date string like "11/17/2025 12:59:09 PM"
+                        record_date = datetime.strptime(date_str, '%m/%d/%Y %I:%M:%S %p').date()
+                        if record_date == today:
+                            today_records.append(record)
+                    except ValueError as e:
+                        logging.debug(f"Date parsing error for '{date_str}': {e}")
+                        # Try alternative formats
+                        try:
+                            record_date = datetime.strptime(date_str, '%m/%d/%Y %I:%M %p').date()
+                            if record_date == today:
+                                today_records.append(record)
+                        except ValueError:
+                            pass
+            
+            logging.info("Records for today (%s): %s", today, len(today_records))
+            
+            # Show today's records
+            if today_records:
+                logging.info("Today's attendance:")
+                for record in today_records:
+                    time_in_record = record[date_time_idx] if len(record) > date_time_idx else "N/A"
+                    temp = record[2] if len(record) > 2 else "N/A"
+                    logging.info(f"  - {time_in_record} (Temp: {temp}°C)")
+                
+                # Check for potential issues
+                if len(today_records) < 2:
+                    logging.warning("⚠️  WARNING: Only one record today. Make sure you have both Time In and Time Out.")
+                elif len(today_records) % 2 != 0:
+                    logging.warning("⚠️  WARNING: Odd number of records today. Possible missing Time Out.")
+                else:
+                    logging.info("✓ Good: Even number of records today (likely both Time In and Time Out)")
+            else:
+                logging.info("No records found for today")
+            
+            return {
+                'employee_id': employee_id,
+                'total_records': len(my_records),
+                'today_records': len(today_records),
+                'today_details': today_records,
+                'analysis_timestamp': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logging.error(f"Error analyzing attendance: {e}")
+            return None
+    
+    def save_attendance_record(self, attendance_data):
+        """Save attendance data to a local JSON file"""
+        try:
+            filename = f"nia_attendance_backup_{datetime.now().strftime('%Y%m')}.json"
+            
+            # Load existing data or create new list
+            if os.path.exists(filename):
+                with open(filename, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            else:
+                data = []
+            
+            # Add new record
+            data.append(attendance_data)
+            
+            # Save back to file
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            
+            logging.info(f"✓ Attendance record saved to {filename}")
+            
+        except Exception as e:
+            logging.error(f"Error saving attendance record: {e}")
+    
+    def _hash_records(self, records):
+        hasher = hashlib.sha256()
+        for row in records:
+            line = "||".join(row)
+            hasher.update(line.encode('utf-8', errors='replace'))
+        return hasher.hexdigest()
 
-    # ... keep all your other existing methods (analyze_attendance_patterns, save_attendance_record, monitor_attendance, one_time_check)
+    def monitor_attendance(self, employee_id, password, interval_seconds=300, max_checks=None):
+            logging.info("Starting continuous monitoring (interval: %s seconds)", interval_seconds)
+            checks = 0
+            driver = None
+            last_hash = None
+
+            try:
+                attendance_data, driver = self.get_attendance_data(
+                    employee_id,
+                    password,
+                    driver=None,
+                    reuse_driver=True
+                )
+
+                if driver is None:
+                    logging.error("Failed to initialize Selenium driver. Cannot start monitoring.")
+                    return
+
+                while True:
+                    if attendance_data:
+                        current_hash = self._hash_records(attendance_data['records'])
+                        if last_hash is None:
+                            last_hash = current_hash
+                            logging.info("Initial snapshot captured (%s records)", attendance_data['records_found'])
+                        elif current_hash != last_hash:
+                            logging.info("Detected change in attendance records!")
+                            last_hash = current_hash
+                            if attendance_data['records']:
+                                self.save_as_csv(attendance_data['table_headers'], attendance_data['records'])
+                            analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
+                            if analysis:
+                                self.save_attendance_record(analysis)
+                        else:
+                            logging.debug("No changes detected since last check.")
+                    else:
+                        logging.warning("No attendance data retrieved this cycle.")
+
+                    checks += 1
+                    if max_checks and checks >= max_checks:
+                        logging.info("Reached max checks limit (%s). Stopping monitor.", max_checks)
+                        break
+
+                    logging.debug("Sleeping for %s seconds before next check...", interval_seconds)
+                    time.sleep(interval_seconds)
+
+                    attendance_data, driver = self.get_attendance_data(
+                        employee_id,
+                        password,
+                        driver=driver,
+                        reuse_driver=True
+                    )
+            except KeyboardInterrupt:
+                logging.info("Monitoring interrupted by user.")
+            finally:
+                if driver:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+        
+    def one_time_check(self, employee_id, password):
+        """Perform a single attendance check with analysis using Selenium"""
+        attendance_data, _ = self.get_attendance_data(employee_id, password)
+        if attendance_data:
+            analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
+            if analysis:
+                self.save_attendance_record(analysis)
+                return analysis
+            return attendance_data
+        return None
+
 
 def main():
     parser = argparse.ArgumentParser(description="NIA Attendance Monitor for Android/Termux")
