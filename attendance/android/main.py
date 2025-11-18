@@ -638,21 +638,36 @@ class NIAAttendanceMonitor:
             emp_id_idx = 4      # Employee ID is the fifth column (index 4)
             temp_idx = 2        # Temperature is the third column (index 2)
             
-            # Get ALL records for this employee (don't filter by FAILED status)
-            my_records = []
-            failed_records = []
-            for record in records:
-                if len(record) <= max(action_idx, emp_id_idx):
-                    continue
-                action_val = record[action_idx] if len(record) > action_idx else ""
-                emp_val = record[emp_id_idx] if len(record) > emp_id_idx else ""
-                is_for_employee = emp_val == employee_id
-                
-                # ONLY include records for this employee (remove the FAILED condition)
-                if is_for_employee:
-                    my_records.append(record)
-                    if "FAILED" in str(action_val).upper():
-                        failed_records.append(record)
+        # Get ALL records for this employee (don't filter by FAILED status)
+        my_records = []
+        failed_records = []
+        for record in records:
+            if len(record) <= max(action_idx, emp_id_idx):
+                continue
+            action_val = record[action_idx] if len(record) > action_idx else ""
+            emp_val = record[emp_id_idx] if len(record) > emp_id_idx else ""
+            
+            # FIX: Better employee ID matching with stripping and type conversion
+            is_for_employee = False
+            if emp_val and employee_id:
+                # Convert both to strings and strip whitespace for comparison
+                emp_val_clean = str(emp_val).strip()
+                employee_id_clean = str(employee_id).strip()
+                is_for_employee = emp_val_clean == employee_id_clean
+            
+            # ONLY include records for this employee
+            if is_for_employee:
+                my_records.append(record)
+                if "FAILED" in str(action_val).upper():
+                    failed_records.append(record)
+
+        # DEBUG: Show what we found
+        logging.debug(f"Looking for employee ID: '{employee_id}'")
+        logging.debug(f"Employee ID type: {type(employee_id)}")
+        for i, record in enumerate(records[:3]):  # Show first 3 records for debugging
+            if len(record) > emp_id_idx:
+                emp_val = record[emp_id_idx]
+                logging.debug(f"Record {i} emp_id: '{emp_val}' (type: {type(emp_val)})")
             
             logging.info("ATTENDANCE ANALYSIS FOR EMPLOYEE %s", employee_id)
             logging.info("Total YOUR records found: %s", len(my_records))
