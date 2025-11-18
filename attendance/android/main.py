@@ -473,32 +473,29 @@ class NIAAttendanceMonitor:
         }
     
     def _format_action_cell(self, cell):
-        """Return enriched text for action cells containing status buttons"""
+        """Return simplified status text for action cells"""
         link = cell.find('a')
         if not link:
             return None
         
         classes = link.get('class', [])
-        label = link.get_text(strip=True) or "Action"
-        status = None
+        
+        # Determine status based on CSS classes
         if any('btn-danger' in cls for cls in classes):
-            status = 'FAILED'
+            return 'FAILED'
         elif any('btn-success' in cls for cls in classes):
-            status = 'SUCCESS'
+            return 'SUCCESS'
         elif any('btn-warning' in cls for cls in classes):
-            status = 'WARNING'
-        
-        href = link.get('href')
-        details = []
-        if status:
-            details.append(status)
-        details.append(label)
-        if href:
-            if href.startswith('/'):
-                href = f"{self.base_url}{href}"
-            details.append(f"Details: {href}")
-        
-        return " | ".join(details)
+            return 'WARNING'
+        else:
+            # Fallback: try to extract from link text
+            label = link.get_text(strip=True) or "Action"
+            if 'fail' in label.lower():
+                return 'FAILED'
+            elif 'success' in label.lower():
+                return 'SUCCESS'
+            else:
+                return label  # Return original if no status detected
     
     def _extract_fallback_data(self, soup):
         """Extract data when no table is found"""
@@ -972,10 +969,9 @@ def main():
                 table.add_column("Entry #", justify="right", style="white")
                 table.add_column("Date & Time", style="green", overflow="fold")
                 table.add_column("Temperature", style="yellow", justify="center")
-                table.add_column("Action / Status", style="magenta", overflow="fold")
+                table.add_column("Status", style="magenta", justify="center")  # Changed to just "Status"
                 
                 # Define column indices based on the table structure
-                # From your headers: [Actions, Date Time, Temperature, Employee Name, Employee ID, Machine Name]
                 action_idx = 0      # Actions column
                 date_time_idx = 1   # Date Time column  
                 temp_idx = 2        # Temperature column
@@ -984,29 +980,37 @@ def main():
                     # Extract the specific columns we want to display
                     date_time = row[date_time_idx] if len(row) > date_time_idx else "N/A"
                     temperature = row[temp_idx] if len(row) > temp_idx else "N/A"
-                    action = row[action_idx] if len(row) > action_idx else "N/A"
+                    status = row[action_idx] if len(row) > action_idx else "N/A"
                     
-                    # Style failed records in red
-                    row_style = "red" if "FAILED" in str(action).upper() else None
+                    # Clean up the status text if it still has extra details
+                    if "|" in str(status):
+                        # Extract just the status part (before the first |)
+                        status = str(status).split("|")[0].strip()
+                    
+                    # Style based on status
+                    if "FAILED" in str(status).upper():
+                        row_style = "red"
+                        status_display = "FAILED"
+                    elif "SUCCESS" in str(status).upper():
+                        row_style = "green"
+                        status_display = "SUCCESS"
+                    elif "WARNING" in str(status).upper():
+                        row_style = "yellow"
+                        status_display = "WARNING"
+                    else:
+                        row_style = None
+                        status_display = status
                     
                     table.add_row(
                         str(idx),
                         date_time,
                         temperature,
-                        action,
+                        status_display,  # Use cleaned status
                         style=row_style
                     )
                 
                 console.print(table)
                 console.print(f"[bold]Today's records displayed:[/] {len(today_details)}")
-                
-                # Show analysis summary
-                if len(today_details) < 2:
-                    console.print("[yellow]⚠️  Only one record today - make sure you have both Time In and Time Out[/yellow]")
-                elif len(today_details) % 2 != 0:
-                    console.print("[yellow]⚠️  Odd number of records - possible missing Time Out[/yellow]")
-                else:
-                    console.print("[green]✓ Good: Even number of records (likely both Time In and Time Out)[/green]")
             else:
                 console.print("[yellow]No records found for today[/yellow]")
                 # Show available dates for context
