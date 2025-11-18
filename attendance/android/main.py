@@ -17,7 +17,6 @@ from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.firefox import GeckoDriverManager
 
 # Set up logging
 logging.basicConfig(
@@ -34,16 +33,45 @@ class NIAAttendanceMonitor:
         self.driver_path = driver_path
     
     def _create_driver(self):
+        """Create Firefox driver optimized for Android/Termux"""
         options = Options()
+        
         if self.headless:
-            options.add_argument("--headless=new")
+            options.add_argument("--headless")
+        
+        # Android/Termux specific options
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--window-size=1920,1080")
-        options.add_argument("--log-level=3")
-        service = Service(self.driver_path or GeckoDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        options.add_argument("--width=1920")
+        options.add_argument("--height=1080")
+        
+        # Set Firefox binary path for Termux
+        firefox_binary = "/data/data/com.termux/files/usr/bin/firefox"
+        if os.path.exists(firefox_binary):
+            options.binary_location = firefox_binary
+        
+        # GeckoDriver setup
+        if self.driver_path:
+            # Use specified driver path
+            service = Service(executable_path=self.driver_path)
+        else:
+            # Try to find geckodriver in common locations
+            possible_paths = [
+                "/data/data/com.termux/files/usr/bin/geckodriver",
+                "/data/data/com.termux/files/usr/local/bin/geckodriver",
+                "./geckodriver"
+            ]
+            
+            for path in possible_paths:
+                if os.path.exists(path):
+                    service = Service(executable_path=path)
+                    break
+            else:
+                # If no geckodriver found, let Selenium try to find it
+                service = Service()
+        
+        driver = webdriver.Firefox(service=service, options=options)
         driver.set_page_load_timeout(60)
         return driver
 
@@ -79,6 +107,7 @@ class NIAAttendanceMonitor:
         # Wait for rows to be populated (if table loads via JS)
         try:
             wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "#DataTables_Table_0 tbody tr")) > 0)
+            time.sleep(3)  # Extra wait for JavaScript to render completely
         except TimeoutException:
             logging.warning("Attendance table loaded but contains no rows (yet). Proceeding with current content.")
 
@@ -93,7 +122,8 @@ class NIAAttendanceMonitor:
             try:
                 driver = self._create_driver()
             except WebDriverException as e:
-                logging.error(f"Unable to start Selenium driver: {e}")
+                logging.error(f"Unable to start Firefox driver: {e}")
+                logging.info("Make sure Firefox and geckodriver are installed in Termux")
                 return None, None
             try:
                 self._login_with_selenium(driver, employee_id, password)
@@ -189,7 +219,6 @@ class NIAAttendanceMonitor:
             'report_generated_time': generated_time
         }
 
-    # Replace the save_as_csv method with this:
     def save_as_csv(self, headers, rows):
         """Save attendance data as CSV file using built-in csv module"""
         try:
@@ -348,7 +377,7 @@ class NIAAttendanceMonitor:
                 )
 
                 if driver is None:
-                    logging.error("Failed to initialize Selenium driver. Cannot start monitoring.")
+                    logging.error("Failed to initialize Firefox driver. Cannot start monitoring.")
                     return
 
                 while True:
@@ -406,11 +435,11 @@ class NIAAttendanceMonitor:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="NIA Attendance Monitor")
+    parser = argparse.ArgumentParser(description="NIA Attendance Monitor for Android/Termux")
     parser.add_argument(
         '--mode',
         choices=['once', 'monitor'],
-        help='Run once or continuously monitor (defaults to interactive prompt)'
+        help='Run once or continuously monitor'
     )
     parser.add_argument(
         '--interval',
@@ -426,11 +455,11 @@ def main():
     parser.add_argument(
         '--show-browser',
         action='store_true',
-        help='Show the browser window instead of headless mode'
+        help='Show the browser window (not recommended for Termux)'
     )
     parser.add_argument(
         '--driver-path',
-        help='Path to ChromeDriver executable (optional)'
+        help='Path to geckodriver executable (optional)'
     )
     parser.add_argument(
         '--verbose',
@@ -463,10 +492,6 @@ def main():
             print("CHECK COMPLETED SUCCESSFULLY!")
             if 'today_records' in result:
                 print(f"Today's records: {result['today_records']}")
-                if result['today_records'] < 2:
-                    print("⚠️  REMINDER: Make sure you have both Time In and Time Out records")
-                else:
-                    print("✓ Good attendance records for today")
         else:
             print("One-time check failed!")
     
