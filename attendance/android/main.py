@@ -588,6 +588,60 @@ class NIAAttendanceMonitor:
         except Exception as e:
             logging.error(f"Analysis error: {e}")
             return None
+
+    def monitor_attendance(self, employee_id, password, interval_seconds=300, max_checks=None, interactive=False):
+        """Monitor attendance with optional interactive mode"""
+        if interactive:
+            return self.interactive_monitor(employee_id, password, interval_seconds)
+        
+        # Original non-interactive monitoring
+        logging.info(f"Monitoring every {interval_seconds}s")
+        checks = 0
+        
+        try:
+            while True:
+                attendance_data = self.get_attendance_data(employee_id, password)
+                
+                if attendance_data:
+                    analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
+                    if analysis:
+                        self.save_attendance_record(analysis)
+                else:
+                    logging.warning("No data this cycle")
+
+                checks += 1
+                if max_checks and checks >= max_checks:
+                    logging.info(f"Reached {max_checks} checks")
+                    break
+
+                time.sleep(interval_seconds)
+                
+        except KeyboardInterrupt:
+            logging.info("Stopped by user")
+    
+    def save_attendance_record(self, attendance_data):
+        """Save attendance data to a local JSON file"""
+        try:
+            filename = f"nia_attendance_backup_{datetime.now().strftime('%Y%m')}.json"
+            
+            # Load existing data or create new list
+            if os.path.exists(filename):
+                with open(filename, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            else:
+                data = []
+            
+            # Add new record
+            data.append(attendance_data)
+            
+            # Save back to file
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            
+            logging.info(f"✓ Saved to {filename}")
+            
+        except Exception as e:
+            logging.error(f"Save error: {e}")
     
     def interactive_monitor(self, employee_id, password, interval_seconds=300):
         """Interactive monitoring with session reuse"""
