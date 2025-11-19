@@ -173,7 +173,6 @@ class NIAAttendanceMonitor:
         self.driver_path = driver_path
         self.state_file = os.path.expanduser('~/.nia_monitor_state.json')
         self._load_state()
-        self.driver = None  # Keep driver instance for session reuse
     
     def _load_state(self):
         try:
@@ -217,19 +216,36 @@ class NIAAttendanceMonitor:
 
     @contextmanager
     def browser_session(self):
+        """Create browser session with better error handling"""
         driver = None
-        try:
-            driver = self._create_driver()
-            yield driver
-        finally:
-            if driver:
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
+        max_attempts = 2
+        
+        for attempt in range(max_attempts):
+            try:
+                driver = self._create_driver()
+                yield driver
+                break  # Success
+            except Exception as e:
+                logging.warning(f"Browser session attempt {attempt + 1} failed: {e}")
+                if driver:
+                    try:
+                        driver.quit()
+                    except:
+                        pass
+                if attempt == max_attempts - 1:
+                    raise  # Re-raise on final attempt
+                else:
+                    raise Exception("Failed to create browser session after multiple attempts")
+            finally:
+                if driver:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass  # Ignore cleanup errors
+                time.sleep(2)  # Wait before retry
 
     def _create_driver(self):
-        """Create Firefox driver optimized for Android/Termux"""
+        """Create Firefox driver with better configuration"""
         options = Options()
         
         if self.headless:
@@ -239,15 +255,21 @@ class NIAAttendanceMonitor:
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--width=800")   # Smaller for mobile
+        options.add_argument("--width=800")
         options.add_argument("--height=600")
+        
+        # Better performance options
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-plugins")
+        options.add_argument("--disable-images")  # Faster loading
+        options.set_preference("permissions.default.image", 2)  # Disable images
         
         # Set Firefox binary path for Termux
         firefox_binary = "/data/data/com.termux/files/usr/bin/firefox"
         if os.path.exists(firefox_binary):
             options.binary_location = firefox_binary
         
-        # GeckoDriver setup
+        # GeckoDriver setup with better error handling
         if self.driver_path:
             service = Service(executable_path=self.driver_path)
         else:
@@ -264,11 +286,14 @@ class NIAAttendanceMonitor:
             else:
                 service = Service()
         
-        driver = webdriver.Firefox(service=service, options=options)
-        driver.set_page_load_timeout(self.config['timeout'])
-        driver.implicitly_wait(10)
-        return driver
-
+        try:
+            driver = webdriver.Firefox(service=service, options=options)
+            driver.set_page_load_timeout(self.config['timeout'])
+            driver.implicitly_wait(10)
+            return driver
+        except Exception as e:
+            logging.error(f"Failed to create driver: {e}")
+            raise
     @retry_on_failure(max_retries=3, delay=2.0)
     def _login_with_selenium(self, driver, employee_id, password):
         """Login once and keep session"""
@@ -423,27 +448,159 @@ class NIAAttendanceMonitor:
                 return label
 
     def get_attendance_data(self, employee_id, password, refresh_only=False):
-        """Get attendance data with optional session reuse"""
-        if not self.driver or not refresh_only:
-            # Create new session and login
-            with self.browser_session() as driver:
-                try:
-                    self._login_with_selenium(driver, employee_id, password)
-                    html_content = self._load_attendance_html(driver, refresh_only=False)
-                    attendance_data = self.parse_attendance_html(html_content)
-                    return self._process_attendance_data(attendance_data, employee_id)
-                except Exception as e:
-                    logging.error(f"Fetch error: {e}")
-                    return None
-        else:
-            # Use existing session for refresh
+        """Get attendance data - always use fresh session for reliability"""
+        # Don't try to reuse sessions - it's causing connection issues
+        # Always create a new session for each request
+        with self.browser_session() as driver:
             try:
-                html_content = self._load_attendance_html(self.driver, refresh_only=True)
+                if not refresh_only:
+                    logging.info("Logging in...")
+                    self._login_with_selenium(driver, employee_id, password)
+                else:
+                    # For "refresh", we still need to login since we can't maintain sessions reliably
+                    logging.info("Re-logging in for refresh...")
+                    self._login_with_selenium(driver, employee_id, password)
+                
+                html_content = self._load_attendance_html(driver, refresh_only=False)
                 attendance_data = self.parse_attendance_html(html_content)
                 return self._process_attendance_data(attendance_data, employee_id)
+                
             except Exception as e:
-                logging.error(f"Refresh error: {e}")
+                logging.error(f"Error: {e}")
                 return None
+            
+    def _load_attendance_html(self, driver, refresh_only=False):
+        """Load attendance page with better error handling"""
+        try:
+            if not refresh_only:
+                logging.info("Loading page...")
+                driver.get(f"{self.base_url}/Attendance")
+            else:
+                logging.info("Refreshing...")
+                # Try multiple approaches for refresh
+                try:
+                    driver.refresh()
+                except:
+                    # Fallback: navigate to the URL again
+                    driver.get(f"{self.base_url}/Attendance")
+            
+            wait = WebDriverWait(driver, 45)
+            
+            # Wait for the table with multiple fallback strategies
+            try:
+                # Strategy 1: Wait for table by ID
+                table_element = wait.until(EC.presence_of_element_located((By.ID, "DataTables_Table_0")))
+                
+                # Strategy 2: Wait for rows in specific tbody
+                wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "#DataTables_Table_0 #tbody1 tr")) > 0)
+                
+            except TimeoutException:
+                # Strategy 3: Look for any table with attendance data
+                try:
+                    wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "table tbody tr")) > 0)
+                    logging.info("Found table with generic selector")
+                except TimeoutException:
+                    logging.error("No table found after refresh")
+                    # Save page source for debugging
+                    try:
+                        with open("refresh_debug.html", "w", encoding="utf-8") as f:
+                            f.write(driver.page_source)
+                        logging.info("Saved refresh page to refresh_debug.html")
+                    except:
+                        pass
+                    raise Exception("No attendance table found")
+            
+            # Give it a moment for JavaScript to render
+            time.sleep(2)
+            
+            rows = driver.find_elements(By.CSS_SELECTOR, "#DataTables_Table_0 #tbody1 tr")
+            if not rows:
+                # Fallback: try generic rows
+                rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+                
+            logging.info(f"Found {len(rows)} records")
+            return driver.page_source
+            
+        except Exception as e:
+            logging.error(f"Page load error: {e}")
+            raise
+
+    def parse_attendance_html(self, html_content):
+        """Parse attendance table HTML with better fallbacks"""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Try multiple table selectors
+        table = soup.find('table', {'id': 'DataTables_Table_0'})
+        if not table:
+            # Fallback: look for any table with attendance data
+            tables = soup.find_all('table')
+            for t in tables:
+                # Check if this looks like an attendance table
+                headers = t.find_all('th')
+                header_texts = [h.get_text(strip=True).lower() for h in headers]
+                if any('time' in text or 'date' in text or 'employee' in text for text in header_texts):
+                    table = t
+                    logging.info("Using fallback table")
+                    break
+        
+        if not table:
+            logging.error("No table found in HTML")
+            # Debug: save the problematic HTML
+            try:
+                with open("no_table_debug.html", "w", encoding="utf-8") as f:
+                    f.write(html_content)
+                logging.info("Saved problematic HTML to no_table_debug.html")
+            except:
+                pass
+            return None
+
+        headers = []
+        thead = table.find('thead')
+        if thead:
+            header_row = thead.find('tr')
+            if header_row:
+                for th in header_row.find_all('th'):
+                    header_text = th.get_text(strip=True)
+                    if '\n' in header_text:
+                        lines = [line.strip() for line in header_text.split('\n') if line.strip()]
+                        header_text = lines[0] if lines else header_text
+                    headers.append(header_text)
+
+        rows = []
+        table_body = table.find('tbody', {'id': 'tbody1'})
+        if not table_body:
+            table_body = table.find('tbody')
+        
+        if table_body:
+            for row in table_body.find_all('tr'):
+                cells = row.find_all('td')
+                if not cells:
+                    continue
+                    
+                row_data = []
+                for i, cell in enumerate(cells):
+                    action_text = self._format_action_cell(cell)
+                    if action_text:
+                        row_data.append(action_text)
+                        continue
+                    if 'sorting_1' in cell.get('class', []):
+                        date_spans = cell.find_all('span')
+                        if date_spans:
+                            date_parts = [span.get_text(strip=True) for span in date_spans]
+                            row_data.append(' '.join(date_parts))
+                        else:
+                            row_data.append(cell.get_text(strip=True))
+                    else:
+                        row_data.append(cell.get_text(strip=True))
+                rows.append(row_data)
+
+        return {
+            'timestamp': datetime.now().isoformat(),
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            'table_headers': headers,
+            'records': rows,
+            'records_found': len(rows)
+        }
 
     def _process_attendance_data(self, attendance_data, employee_id):
         """Process attendance data with change detection"""
@@ -644,104 +801,89 @@ class NIAAttendanceMonitor:
             logging.error(f"Save error: {e}")
     
     def interactive_monitor(self, employee_id, password, interval_seconds=300):
-        """Interactive monitoring with session reuse"""
+        """Interactive monitoring - simplified without session reuse"""
         console = Console()
         
         console.print("[green]🚀 Interactive Monitor[/green]")
         console.print("[dim]R=Refresh S=Save Q=Quit[/dim]")
         
         check_count = 0
-        session_driver = None
         
-        try:
-            # Initial login
-            with self.browser_session() as driver:
-                self._login_with_selenium(driver, employee_id, password)
-                session_driver = driver
-                self.driver = driver  # Store for session reuse
+        while True:
+            console.clear()
+            console.rule(f"[blue]Check #{check_count + 1}[/blue]")
+            
+            console.print("[yellow]🔄 Checking...[/yellow]")
+            
+            # Always create fresh session - more reliable
+            attendance_data = self.get_attendance_data(employee_id, password, refresh_only=False)
+            
+            if attendance_data:
+                check_count += 1
+                analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
                 
-                while True:
-                    console.clear()
-                    console.rule(f"[blue]Check #{check_count + 1}[/blue]")
+                if analysis and analysis.get('today_details'):
+                    # Mobile-optimized table
+                    table = Table(show_header=True, header_style="bold cyan", width=60)
+                    table.add_column("#", justify="right", style="white", width=4)
+                    table.add_column("Time", style="green", width=15)
+                    table.add_column("Temp", style="yellow", width=6)
+                    table.add_column("Status", style="magenta", width=8)
                     
-                    console.print("[yellow]🔄 Checking...[/yellow]")
-                    attendance_data = self.get_attendance_data(employee_id, password, refresh_only=(check_count > 0))
-                    
-                    if attendance_data:
-                        check_count += 1
-                        analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
+                    for idx, row in enumerate(analysis['today_details'], start=1):
+                        date_time = row[1] if len(row) > 1 else "N/A"
+                        temperature = row[2] if len(row) > 2 else "N/A"
+                        status = row[0] if len(row) > 0 else "N/A"
                         
-                        if analysis and analysis.get('today_details'):
-                            # Mobile-optimized table
-                            table = Table(show_header=True, header_style="bold cyan", width=60)
-                            table.add_column("#", justify="right", style="white", width=4)
-                            table.add_column("Time", style="green", width=15)
-                            table.add_column("Temp", style="yellow", width=6)
-                            table.add_column("Status", style="magenta", width=8)
-                            
-                            for idx, row in enumerate(analysis['today_details'], start=1):
-                                date_time = row[1] if len(row) > 1 else "N/A"
-                                temperature = row[2] if len(row) > 2 else "N/A"
-                                status = row[0] if len(row) > 0 else "N/A"
-                                
-                                if "|" in str(status):
-                                    status = str(status).split("|")[0].strip()
-                                
-                                # Shorten time for mobile
-                                time_part = date_time.split()[1] if ' ' in date_time else date_time
-                                row_style = "red" if "FAILED" in str(status).upper() else None
-                                table.add_row(str(idx), time_part, temperature, status, style=row_style)
-                            
-                            console.print(table)
-                            console.print(f"[green]✓ {len(analysis['today_details'])} today[/green]")
-                        else:
-                            console.print("[yellow]No today records[/yellow]")
+                        if "|" in str(status):
+                            status = str(status).split("|")[0].strip()
+                        
+                        # Shorten time for mobile
+                        time_part = date_time.split()[1] if ' ' in date_time else date_time
+                        row_style = "red" if "FAILED" in str(status).upper() else None
+                        table.add_row(str(idx), time_part, temperature, status, style=row_style)
+                    
+                    console.print(table)
+                    console.print(f"[green]✓ {len(analysis['today_details'])} today[/green]")
+                else:
+                    console.print("[yellow]No today records[/yellow]")
+            else:
+                console.print("[red]❌ Fetch failed[/red]")
+            
+            # Mobile-friendly status
+            console.print(f"\n[dim]#{check_count} {datetime.now().strftime('%H:%M')}[/dim]")
+            console.print("[bold]R[/bold]efresh [bold]S[/bold]ave [bold]Q[/bold]uit")
+            
+            # Input with mobile-friendly prompts
+            try:
+                key = console.input("\nCmd: ").lower().strip()
+                
+                if key == 'q':
+                    break
+                elif key == 's':
+                    if attendance_data and self.config.get('enable_csv', False):
+                        filename = self.save_as_csv(
+                            attendance_data['table_headers'],
+                            attendance_data['records'],
+                            {'manual_save': True, 'check_count': check_count}
+                        )
+                        if filename:
+                            console.print(f"[green]Saved[/green]")
+                        console.input("Enter...")
                     else:
-                        console.print("[red]❌ Fetch failed[/red]")
+                        console.print("[yellow]CSV disabled[/yellow]")
+                        console.input("Enter...")
+                elif key == 'r':
+                    continue  # This will just loop again with fresh session
+                else:
+                    console.print("[yellow]Use R,S,Q[/yellow]")
+                    console.input("Enter...")
                     
-                    # Mobile-friendly status
-                    console.print(f"\n[dim]#{check_count} {datetime.now().strftime('%H:%M')}[/dim]")
-                    console.print("[bold]R[/bold]efresh [bold]S[/bold]ave [bold]Q[/bold]uit")
-                    
-                    # Input with mobile-friendly prompts
-                    try:
-                        key = console.input("\nCmd: ").lower().strip()
-                        
-                        if key == 'q':
-                            break
-                        elif key == 's':
-                            if attendance_data and self.config.get('enable_csv', False):
-                                filename = self.save_as_csv(
-                                    attendance_data['table_headers'],
-                                    attendance_data['records'],
-                                    {'manual_save': True, 'check_count': check_count}
-                                )
-                                if filename:
-                                    console.print(f"[green]Saved[/green]")
-                                console.input("Enter...")
-                            else:
-                                console.print("[yellow]CSV disabled[/yellow]")
-                                console.input("Enter...")
-                        elif key == 'r':
-                            continue
-                        else:
-                            console.print("[yellow]Use R,S,Q[/yellow]")
-                            console.input("Enter...")
-                            
-                    except KeyboardInterrupt:
-                        console.print("\n[yellow]Stopping...[/yellow]")
-                        break
-                        
-        finally:
-            if session_driver:
-                try:
-                    session_driver.quit()
-                    self.driver = None
-                except Exception:
-                    pass
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Stopping...[/yellow]")
+                break
         
         console.print("[green]✅ Stopped[/green]")
-
     def one_time_check(self, employee_id, password):
         """Single check with mobile-optimized output"""
         attendance_data = self.get_attendance_data(employee_id, password)
