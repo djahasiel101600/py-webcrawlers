@@ -684,10 +684,10 @@ class NIAAttendanceMonitor:
 
     def start_signalr_monitor(self, employee_id, password, on_attendance_update, verbose=False):
         """Start real-time SignalR WebSocket monitoring with hacker aesthetic"""
-        console.print("\n" + "═" * 70)
+        console.print("\n" + "═" * 59)
         console.print(Align.center("🚀 NIA ATTENDANCE MONITOR - REAL-TIME MODE"))
         console.print(Align.center("🔐 SECURE CONNECTION INITIATED"))
-        console.print("═" * 70)
+        console.print("═" * 59)
         
         # First, login to get session cookies
         if not self.login(employee_id, password):
@@ -719,9 +719,9 @@ class NIAAttendanceMonitor:
         console.print("│ [blue]🌐 SIGNALR: Establishing real-time channel...[/blue]")
         
         if signalr_monitor.connect(connection_token):
-            console.print("│ [green]✅ SIGNALR: Real-time channel active[/green]")
+            console.print("│ [59n]✅ SIGNALR: Real-time channel active[/green]")
             console.print("│ [dim]💡 CONTROLS: Press Ctrl+C to terminate connection[/dim]")
-            console.print("─" * 70)
+            console.print("─" * 59)
             
             try:
                 # Keep main thread alive
@@ -800,10 +800,10 @@ class NIAAttendanceMonitor:
 
     def real_time_monitor(self, employee_id, password, poll_interval=10):
         """Real-time monitoring with frequent API polls - hacker style"""
-        console.print("\n" + "═" * 70)
+        console.print("\n" + "═" * 59)
         console.print(Align.center("🔄 NIA ATTENDANCE MONITOR - POLLING MODE"))
         console.print(Align.center(f"📡 POLLING INTERVAL: {poll_interval}s"))
-        console.print("═" * 70)
+        console.print("═" * 59)
         
         if not self.login(employee_id, password):
             return
@@ -821,9 +821,9 @@ class NIAAttendanceMonitor:
                     current_count = len(attendance_data.get('records', []))
                     
                     # Clear and update display
-                    console.clear()
+                    console.clear59
                     console.print(Align.center(f"🔍 LIVE MONITOR - SCAN #{check_count}"))
-                    console.print("─" * 70)
+                    console.print("─" * 59)
                     
                     # Show real-time status
                     console.print(f"│ [dim]🕒 LAST SCAN: {datetime.now().strftime('%H:%M:%S')}[/dim]")
@@ -914,9 +914,9 @@ class NIAAttendanceMonitor:
 def handle_signalr_attendance_update(attendance_data):
     """Callback for real-time updates - hacker style"""
     console.print()
-    console.print("═" * 70)
+    console.print("═" * 59)
     console.print(Align.center("⚡ REAL-TIME BIOMETRIC UPDATE"))
-    console.print("─" * 70)
+    console.print("─" * 59)
     
     if isinstance(attendance_data, dict):
         employee_name = attendance_data.get('Name', 'UNKNOWN_USER')
@@ -947,13 +947,13 @@ def handle_signalr_attendance_update(attendance_data):
         
     console.print(f"│ [dim]📡 SIGNAL: {datetime.now().strftime('%H:%M:%S')}[/dim]")
     console.print("│ [dim]🔍 SYSTEM: Continuing surveillance...[/dim]")
-    console.print("─" * 70)
+    console.print("─" * 59)
 
 def main():
     console.print("\n")
     console.print(Align.center("┌─────────────────────────────────────────────────────┐"))
     console.print(Align.center("│              NIA ATTENDANCE MONITOR v2.0            │"))
-    console.print(Align.center("│               [red]SECURE BIOMETRIC SURVEILLANCE[/red]            │"))
+    console.print(Align.center("│             [red]SECURE BIOMETRIC SURVEILLANCE[/red]          │"))
     console.print(Align.center("└─────────────────────────────────────────────────────┘"))
     console.print()
     
