@@ -1,3 +1,6 @@
+import psutil
+import time
+from datetime import timedelta
 import websocket
 import re
 import json
@@ -104,19 +107,33 @@ class NIASignalRMonitor:
         self.session_cookies = session_cookies
         self.ws = None
         self.is_connected = False
+        self.should_reconnect = True  # Control flag
         self.callbacks = []
         self.message_id = 0
         self.verbose = verbose
-    
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 10
+        self.last_message_time = time.time()
+        self.connection_id = None
+        
     def add_callback(self, callback):
         """Add a callback function for attendance updates"""
         if callable(callback):
             self.callbacks.append(callback)
     
     def on_message(self, ws, message):
-        """Handle incoming WebSocket messages with hacker style"""
+        """Handle incoming WebSocket messages"""
         try:
+            self.last_message_time = time.time()  # Update activity timestamp
+            
             data = json.loads(message)
+            
+            # Log connection maintenance messages quietly
+            if isinstance(data, dict):
+                if 'C' in data:  # Context ID
+                    self.connection_id = data['C']
+                if 'S' in data:  # Success indicator
+                    console.print("│ [dim]📡 SIGNALR: Connection maintained[/dim]")
             
             if isinstance(data, dict) and 'M' in data:
                 methods = data.get('M', [])
@@ -127,28 +144,100 @@ class NIASignalRMonitor:
                     
                     if method_name == "biohub" and method_type in ["attendanceUpdate", "newRecord"]:
                         self._handle_attendance_update(method_args)
-                        # Show data transmission indicator
-                        console.print("│ [bright_black]📡 DATA STREAM: SignalR packet received[/bright_black]")
+                        # Reset reconnect attempts on successful data
+                        self.reconnect_attempts = 0
                         
         except json.JSONDecodeError:
-            console.print("│ [red]⚠️  DATA CORRUPTION: Invalid JSON packet[/red]")
+            if self.verbose:
+                console.print("│ [yellow]⚠️  DATA: Invalid JSON packet[/yellow]")
     
     def on_error(self, ws, error):
-        """Handle WebSocket errors with hacker style"""
+        """Handle WebSocket errors with reconnection logic"""
         if self.verbose:
             console.print(f"│ [red]🚨 CONNECTION ERROR: {error}[/red]")
         self.is_connected = False
+        
+        # Auto-reconnect unless manually stopped
+        if self.should_reconnect and self.reconnect_attempts < self.max_reconnect_attempts:
+            self._schedule_reconnect()
     
     def on_close(self, ws, close_status_code, close_msg):
-        """Handle WebSocket closure"""
-        console.print("│ [yellow]🔌 SIGNALR: Connection terminated[/yellow]")
+        """Handle WebSocket closure with reconnection logic"""
+        console.print(f"│ [yellow]🔌 CONNECTION CLOSED: Code {close_status_code}[/yellow]")
         self.is_connected = False
+        
+        # Don't reconnect if we intentionally closed or too many attempts
+        if (close_status_code == 1000 or 
+            self.reconnect_attempts >= self.max_reconnect_attempts or
+            not self.should_reconnect):
+            return
+            
+        # Auto-reconnect for unexpected closures
+        self._schedule_reconnect()
     
     def on_open(self, ws):
         """Handle WebSocket connection opened"""
         console.print("│ [green]🔓 SIGNALR: Secure channel established[/green]")
         self.is_connected = True
+        self.reconnect_attempts = 0
+        self.last_message_time = time.time()
         self._send_join_message()
+        
+        # Start keep-alive monitoring
+        self._start_keep_alive()
+    
+    def _schedule_reconnect(self):
+        """Schedule reconnection with exponential backoff"""
+        if not self.should_reconnect:
+            return
+            
+        self.reconnect_attempts += 1
+        delay = min(30, 2 ** self.reconnect_attempts)  # Exponential backoff, max 30 seconds
+        
+        console.print(f"│ [yellow]🔄 RECONNECT: Attempt {self.reconnect_attempts}/{self.max_reconnect_attempts} in {delay}s[/yellow]")
+        
+        # Schedule reconnection
+        threading.Timer(delay, self._reconnect).start()
+    
+    def _reconnect(self):
+        """Attempt to reconnect"""
+        if not self.should_reconnect or self.reconnect_attempts >= self.max_reconnect_attempts:
+            console.print("│ [red]🚨 RECONNECT: Maximum attempts reached[/red]")
+            return
+            
+        console.print("│ [blue]🔄 RECONNECT: Attempting to re-establish connection...[/blue]")
+        self.connect(self.connection_token)
+    
+    def _start_keep_alive(self):
+        """Start keep-alive monitoring to detect dead connections"""
+        def keep_alive_monitor():
+            while self.is_connected and self.should_reconnect:
+                time.sleep(30)  # Check every 30 seconds
+                
+                if not self.is_connected:
+                    break
+                    
+                # If no messages received in 2 minutes, connection might be dead
+                idle_time = time.time() - self.last_message_time
+                if idle_time > 120:  # 2 minutes without messages
+                    console.print("│ [yellow]⚠️  KEEP-ALIVE: Connection appears idle, forcing reconnect[/yellow]")
+                    self.ws.close()
+                    break
+                    
+                # Send ping if supported (some SignalR implementations)
+                if idle_time > 60:  # 1 minute idle
+                    self._send_keep_alive()
+        
+        threading.Thread(target=keep_alive_monitor, daemon=True).start()
+    
+    def _send_keep_alive(self):
+        """Send keep-alive message if the protocol supports it"""
+        try:
+            # Some SignalR implementations support ping
+            ping_message = {"H": "biohub", "M": "ping", "A": [], "I": self._get_next_message_id()}
+            self._send_message(ping_message)
+        except:
+            pass  # Ping not supported, that's OK
     
     def _handle_attendance_update(self, args):
         """Process real-time attendance updates"""
@@ -161,7 +250,8 @@ class NIASignalRMonitor:
                 try:
                     callback(attendance_data)
                 except Exception as e:
-                    console.print(f"│ [red]⚠️  CALLBACK ERROR: {e}[/red]")
+                    if self.verbose:
+                        console.print(f"│ [red]⚠️  CALLBACK ERROR: {e}[/red]")
     
     def _send_join_message(self):
         """Send join message"""
@@ -172,7 +262,6 @@ class NIASignalRMonitor:
             "I": self._get_next_message_id()
         }
         self._send_message(join_message)
-        console.print("│ [blue]🔑 AUTH: Joining biohub channel...[/blue]")
     
     def _send_message(self, message):
         """Send message through WebSocket"""
@@ -180,8 +269,12 @@ class NIASignalRMonitor:
             try:
                 message_str = json.dumps(message)
                 self.ws.send(message_str)
+                return True
             except Exception as e:
-                console.print(f"│ [red]⚠️  TRANSMISSION FAILED: {e}[/red]")
+                if self.verbose:
+                    console.print(f"│ [red]⚠️  TRANSMISSION FAILED: {e}[/red]")
+                return False
+        return False
     
     def _get_next_message_id(self):
         """Get next message ID"""
@@ -189,8 +282,10 @@ class NIASignalRMonitor:
         return self.message_id
     
     def connect(self, connection_token):
-        """Connect to SignalR WebSocket with hacker style"""
+        """Connect to SignalR WebSocket with reconnection support"""
         try:
+            self.connection_token = connection_token  # Store for reconnections
+            
             console.print("│ [blue]🌐 INITIATING: SignalR handshake...[/blue]")
             
             # Build WebSocket URL with connection token
@@ -206,9 +301,6 @@ class NIASignalRMonitor:
                 'Referer': f'{self.base_url}/Attendance'
             }
             
-            console.print(f"│ [dim]🔗 ENDPOINT: {self.base_url}[/dim]")
-            console.print("│ [yellow]⏳ ESTABLISHING: Secure WebSocket...[/yellow]")
-            
             # Create WebSocket connection
             self.ws = websocket.WebSocketApp(
                 websocket_url,
@@ -221,17 +313,18 @@ class NIASignalRMonitor:
             
             # Run in background thread
             def run_websocket():
-                self.ws.run_forever()
+                self.ws.run_forever(ping_interval=30, ping_timeout=10)  # Added WebSocket ping
             
             thread = threading.Thread(target=run_websocket)
             thread.daemon = True
             thread.start()
             
-            # Wait for connection with cool animation
+            # Wait for connection
             for i in range(15):
                 if self.is_connected:
                     return True
-                console.print(f"│ [dim]🔄 HANDSHAKE: {i+1}/15 attempts[/dim]", end="\r")
+                if not self.should_reconnect:  # Check if user wants to stop
+                    return False
                 time.sleep(1)
             
             return False
@@ -255,11 +348,16 @@ class NIASignalRMonitor:
         return url
     
     def disconnect(self):
-        """Disconnect WebSocket"""
+        """Disconnect WebSocket gracefully"""
+        console.print("│ [yellow]🔒 DISCONNECTING: Secure channel...[/yellow]")
+        self.should_reconnect = False  # Stop auto-reconnect
+        self.is_connected = False
+        
         if self.ws:
-            console.print("│ [yellow]🔒 DISCONNECTING: Secure channel...[/yellow]")
-            self.ws.close()
-            self.is_connected = False
+            try:
+                self.ws.close()
+            except:
+                pass
 
 class NIAAttendanceMonitor:
     def __init__(self, config=None):
@@ -683,26 +781,23 @@ class NIAAttendanceMonitor:
         return panel
 
     def start_signalr_monitor(self, employee_id, password, on_attendance_update, verbose=False):
-        """Start real-time SignalR WebSocket monitoring with hacker aesthetic"""
-        console.print("\n" + "═" * 59)
+        """Start real-time SignalR WebSocket monitoring with auto-reconnect"""
+        console.print("\n" + "═" * 70)
         console.print(Align.center("🚀 NIA ATTENDANCE MONITOR - REAL-TIME MODE"))
-        console.print(Align.center("🔐 SECURE CONNECTION INITIATED"))
-        console.print("═" * 59)
+        console.print(Align.center("🔐 SECURE CONNECTION WITH AUTO-RECONNECT"))
+        console.print("═" * 70)
         
         # First, login to get session cookies
         if not self.login(employee_id, password):
             console.print("│ [red]🚨 ABORT: Authentication failed[/red]")
             return False
         
-        # Get current attendance data to display initially
+        # Get current attendance data
         console.print("│ [blue]📡 INIT: Loading current attendance state...[/blue]")
         current_attendance = self.get_attendance_data(employee_id)
         
-        # Display current attendance in hacker style
         if current_attendance:
             self._display_current_attendance_hacker(current_attendance, employee_id)
-        else:
-            console.print("│ [red]🚨 ERROR: No attendance data available[/red]")
         
         # Get connection token
         connection_token = self.get_signalr_connection_token()
@@ -717,17 +812,22 @@ class NIAAttendanceMonitor:
         signalr_monitor.add_callback(on_attendance_update)
         
         console.print("│ [blue]🌐 SIGNALR: Establishing real-time channel...[/blue]")
+        console.print("│ [dim]💡 This connection will automatically reconnect if dropped[/dim]")
         
         if signalr_monitor.connect(connection_token):
             console.print("│ [green]✅ SIGNALR: Real-time channel active[/green]")
             console.print("│ [dim]💡 CONTROLS: Press Ctrl+C to terminate connection[/dim]")
-            console.print("─" * 59)
+            console.print("─" * 70)
             
             try:
-                # Keep main thread alive
-                while signalr_monitor.is_connected:
-                    time.sleep(1)
-                        
+                # Keep main thread alive, monitor connection status
+                while signalr_monitor.should_reconnect:
+                    time.sleep(5)
+                    
+                    # Show connection status periodically
+                    if not signalr_monitor.is_connected and signalr_monitor.reconnect_attempts > 0:
+                        console.print(f"│ [yellow]🔄 RECONNECT: Attempt {signalr_monitor.reconnect_attempts}/10[/yellow]")
+                            
             except KeyboardInterrupt:
                 console.print("\n│ [yellow]⚠️  USER: Termination signal received[/yellow]")
                 
@@ -741,7 +841,7 @@ class NIAAttendanceMonitor:
         
         console.print("│ [green]✅ SYSTEM: Monitor terminated successfully[/green]")
         return True
-
+    
     def _display_current_attendance_hacker(self, attendance_data, employee_id):
         """Display current day's attendance in hacker style"""
         analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
@@ -910,6 +1010,41 @@ class NIAAttendanceMonitor:
             console.print("\n│ [yellow]⚠️  USER: Termination signal received[/yellow]")
         
         console.print("│ [green]✅ SYSTEM: Polling monitor terminated[/green]")
+
+    def get_system_uptime(self):
+        """Get system uptime in human readable format"""
+        try:
+            boot_time = psutil.boot_time()
+            uptime_seconds = time.time() - boot_time
+            uptime = timedelta(seconds=int(uptime_seconds))
+            
+            # Format as days, hours, minutes
+            days = uptime.days
+            hours, remainder = divmod(uptime.seconds, 3600)
+            minutes, _ = divmod(remainder, 60)
+            
+            if days > 0:
+                return f"{days}d {hours}h {minutes}m"
+            else:
+                return f"{hours}h {minutes}m"
+        except:
+            return "N/A"
+
+    def display_status_header(self, title="NIA ATTENDANCE MONITOR"):
+        """Display header with system info"""
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        uptime = self.get_system_uptime()
+        
+        console.print("\n" + "═" * 70)
+        
+        # Main title
+        console.print(Align.center(f"🚀 {title}"))
+        
+        # System info line
+        status_line = f"🕒 {current_time} | ⏱️  Uptime: {uptime} | 👤 {self.employee_id}"
+        console.print(Align.center(f"[dim]{status_line}[/dim]"))
+        
+        console.print("═" * 70)
 
 def handle_signalr_attendance_update(attendance_data):
     """Callback for real-time updates - hacker style"""
