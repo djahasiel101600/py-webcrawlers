@@ -122,35 +122,35 @@ class NIASignalRMonitor:
             self.callbacks.append(callback)
     
     def on_message(self, ws, message):
-        """Handle incoming WebSocket messages"""
+        """Enhanced debug version - logs EVERYTHING"""
         try:
-            self.last_message_time = time.time()  # Update activity timestamp
-            
+            self.last_message_time = time.time()
             data = json.loads(message)
             
-            # Log connection maintenance messages quietly
-            if isinstance(data, dict):
-                if 'C' in data:  # Context ID
-                    self.connection_id = data['C']
-                if 'S' in data:  # Success indicator
-                    console.print("│ [dim]📡 SIGNALR: Connection maintained[/dim]")
+            # Log the raw message structure
+            console.print(f"│ [cyan]📨 INCOMING: {type(data)} - Keys: {list(data.keys()) if isinstance(data, dict) else 'N/A'}[/cyan]")
             
-            if isinstance(data, dict) and 'M' in data:
-                methods = data.get('M', [])
-                for method in methods:
-                    method_name = method.get('H')
-                    method_type = method.get('M')
-                    method_args = method.get('A', [])
-                    
-                    if method_name == "biohub" and method_type in ["attendanceUpdate", "newRecord"]:
-                        self._handle_attendance_update(method_args)
-                        # Reset reconnect attempts on successful data
-                        self.reconnect_attempts = 0
+            # If it's a dict, log all important keys
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    if key in ['M', 'C', 'S', 'I']:  # SignalR specific keys
+                        console.print(f"│ [dim]   {key}: {str(value)[:50]}...[/dim]")
+                
+                # Process methods if present
+                if 'M' in data and isinstance(data['M'], list):
+                    for method in data['M']:
+                        hub = method.get('H', 'Unknown')
+                        method_name = method.get('M', 'Unknown')
+                        console.print(f"│ [green]🎯 METHOD: {hub}.{method_name}[/green]")
                         
-        except json.JSONDecodeError:
-            if self.verbose:
-                console.print("│ [yellow]⚠️  DATA: Invalid JSON packet[/yellow]")
-    
+                        # Trigger on ANY method from biohub/attendancehub
+                        if hub.lower() in ['biohub', 'attendancehub']:
+                            self._handle_attendance_update(method.get('A', []))
+                            
+        except Exception as e:
+            console.print(f"│ [red]❌ MESSAGE ERROR: {e}[/red]")
+            console.print(f"│ [red]   Raw message: {message}[/red]")
+
     def on_error(self, ws, error):
         """Handle WebSocket errors with reconnection logic"""
         if self.verbose:
@@ -781,63 +781,147 @@ class NIAAttendanceMonitor:
         return panel
 
     def start_signalr_monitor(self, employee_id, password, on_attendance_update, verbose=False):
-        """Start real-time SignalR WebSocket monitoring with auto-reconnect"""
-        console.print("\n" + "═" * 59)
-        console.print(Align.center("🚀 NIA ATTENDANCE MONITOR - REAL-TIME MODE"))
-        console.print(Align.center("🔐 SECURE CONNECTION WITH AUTO-RECONNECT"))
-        console.print("═" * 59)
+        """Enhanced real-time monitoring with better refresh controls"""
+        console.print("\n" + "═" * 70)
+        console.print(Align.center("🚀 NIA ATTENDANCE MONITOR - ENHANCED MODE"))
+        console.print(Align.center("🎮 LIVE UPDATES + MANUAL CONTROLS"))
+        console.print("═" * 70)
         
-        # First, login to get session cookies
         if not self.login(employee_id, password):
             console.print("│ [red]🚨 ABORT: Authentication failed[/red]")
             return False
         
-        # Get current attendance data
-        console.print("│ [blue]📡 INIT: Loading current attendance state...[/blue]")
-        current_attendance = self.get_attendance_data(employee_id)
+        def refresh_display():
+            """Helper function to refresh the display"""
+            current_attendance = self.get_attendance_data(employee_id)
+            if current_attendance:
+                console.clear()
+                console.print(Align.center("🔄 DISPLAY REFRESHED"))
+                console.print("─" * 70)
+                self._display_current_attendance_hacker(current_attendance, employee_id)
+                return True
+            return False
         
-        if current_attendance:
-            self._display_current_attendance_hacker(current_attendance, employee_id)
+        # Initial display
+        console.print("│ [blue]📡 LOADING: Initial attendance data...[/blue]")
+        if not refresh_display():
+            console.print("│ [red]❌ Failed to load initial data[/red]")
+            return False
         
-        # Get connection token
+        # Try SignalR connection
         connection_token = self.get_signalr_connection_token()
+        signalr_monitor = None
         
-        if not connection_token:
-            console.print("│ [yellow]⚠️  SIGNALR: Falling back to polling mode[/yellow]")
-            return self.real_time_monitor(employee_id, password)
-        
-        # Get cookies and create monitor
-        cookies_dict = {c.name: c.value for c in self.session.cookies}
-        signalr_monitor = NIASignalRMonitor(self.base_url, cookies_dict, verbose=verbose)
-        signalr_monitor.add_callback(on_attendance_update)
-        
-        console.print("│ [blue]🌐 SIGNALR: Establishing real-time channel...[/blue]")
-        console.print("│ [dim]💡 This connection will automatically reconnect if dropped[/dim]")
-        
-        if signalr_monitor.connect(connection_token):
-            console.print("│ [green]✅ SIGNALR: Real-time channel active[/green]")
-            console.print("│ [dim]💡 CONTROLS: Press Ctrl+C to terminate connection[/dim]")
-            console.print("─" * 59)
+        if connection_token:
+            cookies_dict = {c.name: c.value for c in self.session.cookies}
+            signalr_monitor = NIASignalRMonitor(self.base_url, cookies_dict, verbose=verbose)
+            signalr_monitor.add_callback(on_attendance_update)
             
-            try:
-                # Keep main thread alive, monitor connection status
-                while signalr_monitor.should_reconnect:
-                    time.sleep(5)
-                    
-                    # Show connection status periodically
-                    if not signalr_monitor.is_connected and signalr_monitor.reconnect_attempts > 0:
-                        console.print(f"│ [yellow]🔄 RECONNECT: Attempt {signalr_monitor.reconnect_attempts}/10[/yellow]")
-                            
-            except KeyboardInterrupt:
-                console.print("\n│ [yellow]⚠️  USER: Termination signal received[/yellow]")
-                
-            finally:
-                signalr_monitor.disconnect()
-        
+            if signalr_monitor.connect(connection_token):
+                console.print("│ [green]✅ SIGNALR: Real-time channel active[/green]")
+            else:
+                console.print("│ [yellow]⚠️  SIGNALR: Using manual mode only[/yellow]")
+                signalr_monitor = None
         else:
-            console.print("│ [red]🚨 SIGNALR: Connection failed[/red]")
-            console.print("│ [yellow]🔄 FALLBACK: Activating polling mode...[/yellow]")
-            return self.real_time_monitor(employee_id, password)
+            console.print("│ [yellow]⚠️  SIGNALR: Using manual mode only[/yellow]")
+        
+        console.print("│ [cyan]🎮 CONTROLS:[/cyan]")
+        console.print("│   [bold]R[/bold] = Refresh data now")
+        console.print("│   [bold]C[/bold] = Check connection status") 
+        console.print("│   [bold]L[/bold] = Live test (force update)")
+        console.print("│   [bold]Q[/bold] = Quit monitoring")
+        if signalr_monitor:
+            console.print("│ [dim]💡 Real-time updates: ACTIVE[/dim]")
+        else:
+            console.print("│ [dim]💡 Real-time updates: INACTIVE[/dim]")
+        console.print("─" * 70)
+        
+        last_refresh = time.time()
+        refresh_count = 0
+        
+        try:
+            while True:
+                # Show status line
+                status_line = f"🕒 {datetime.now().strftime('%H:%M:%S')} | 🔄 {refresh_count} refreshes"
+                if signalr_monitor and signalr_monitor.is_connected:
+                    status_line += " | 📡 LIVE"
+                else:
+                    status_line += " | ⚡ MANUAL"
+                
+                console.print(f"│ [dim]{status_line}[/dim]")
+                console.print("│ [bright_black]Command (R/C/L/Q): [/bright_black]", end="")
+                
+                try:
+                    # Get user input with timeout
+                    import select
+                    import sys
+                    
+                    start_time = time.time()
+                    key = ""
+                    
+                    while time.time() - start_time < 10:  # 10 second timeout
+                        if sys.stdin in select.select([sys.stdin], [], [], 1)[0]:
+                            key = sys.stdin.readline().strip().lower()
+                            break
+                        # Show countdown
+                        remaining = 10 - int(time.time() - start_time)
+                        console.print(f"\r│ [bright_black]Command (R/C/L/Q) [{remaining}s]: [/bright_black]", end="")
+                    
+                    console.print()  # New line after input
+                    
+                    if key == 'q':
+                        break
+                    elif key == 'r':
+                        refresh_count += 1
+                        console.print("│ [yellow]🔄 MANUAL: Refreshing data...[/yellow]")
+                        if refresh_display():
+                            console.print("│ [green]✅ REFRESH: Complete![/green]")
+                        last_refresh = time.time()
+                    elif key == 'c':
+                        console.print("│ [blue]🔍 CONNECTION CHECK:[/blue]")
+                        console.print(f"│   API: ✅ Active")
+                        if signalr_monitor:
+                            console.print(f"│   SignalR: {'✅ Connected' if signalr_monitor.is_connected else '❌ Disconnected'}")
+                            console.print(f"│   Reconnect attempts: {signalr_monitor.reconnect_attempts}")
+                            console.print(f"│   Last signal: {time.time() - signalr_monitor.last_message_time:.1f}s ago")
+                        else:
+                            console.print("│   SignalR: ❌ Not available")
+                    elif key == 'l':
+                        console.print("│ [cyan]🧪 LIVE TEST: Simulating real-time update...[/cyan]")
+                        # Create a test update
+                        test_data = {
+                            'Name': 'TEST USER',
+                            'DateTimeStamp': '/Date(' + str(int(time.time() * 1000)) + ')/',
+                            'Temperature': 36.5,
+                            'AccessResult': 1
+                        }
+                        on_attendance_update(test_data)
+                    elif key == '':
+                        # Auto-refresh every 10 minutes
+                        if time.time() - last_refresh > 600:
+                            refresh_count += 1
+                            console.print("│ [dim]🔄 AUTO: Refreshing data (10min interval)...[/dim]")
+                            refresh_display()
+                            last_refresh = time.time()
+                    else:
+                        console.print("│ [yellow]⚠️  Unknown command. Use R/C/L/Q[/yellow]")
+                    
+                    # Redisplay controls
+                    console.print("─" * 70)
+                    
+                except KeyboardInterrupt:
+                    break
+                except Exception as e:
+                    if verbose:
+                        console.print(f"│ [red]⚠️  INPUT ERROR: {e}[/red]")
+                    time.sleep(1)
+                    
+        except KeyboardInterrupt:
+            console.print("\n│ [yellow]⚠️  USER: Termination signal received[/yellow]")
+        
+        finally:
+            if signalr_monitor:
+                signalr_monitor.disconnect()
         
         console.print("│ [green]✅ SYSTEM: Monitor terminated successfully[/green]")
         return True
