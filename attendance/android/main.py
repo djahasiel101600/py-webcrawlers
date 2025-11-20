@@ -121,36 +121,58 @@ class NIASignalRMonitor:
             self.callbacks.append(callback)
     
     def on_message(self, ws, message):
-        """Handle incoming WebSocket messages with enhanced logging"""
+        """Fixed message handling for actual NIA SignalR format"""
         try:
             self.last_message_time = time.time()
             data = json.loads(message)
             
-            # Log all message types for debugging
-            if self.verbose:
-                console.print(f"│ [dim]📨 SIGNALR: {json.dumps(data)[:100]}...[/dim]")
+            # Show raw message for debugging
+            console.print(f"│ [dim]📨 SIGNALR: {json.dumps(data)[:150]}...[/dim]")
             
             if isinstance(data, dict):
+                # Update connection ID
                 if 'C' in data:
                     self.connection_id = data['C']
+                    console.print(f"│ [green]🔗 Connection: {self.connection_id}[/green]")
                 
-                if 'M' in data:
-                    methods = data.get('M', [])
-                    for method in methods:
-                        method_name = method.get('H')
-                        method_type = method.get('M')
+                # Process methods - FIXED FOR ACTUAL FORMAT
+                if 'M' in data and isinstance(data['M'], list):
+                    for method in data['M']:
+                        hub_name = method.get('H', 'Unknown')
+                        method_type = method.get('M', 'Unknown')
                         method_args = method.get('A', [])
                         
-                        console.print(f"│ [dim]📡 HUB: {method_name}, METHOD: {method_type}[/dim]")
+                        console.print(f"│ [cyan]🎯 HUB: {hub_name} | METHOD: {method_type}[/cyan]")
                         
-                        if method_name == "biohub" and method_type in ["attendanceUpdate", "newRecord"]:
-                            self._handle_attendance_update(method_args)
-                            self.reconnect_attempts = 0
+                        # FIXED: Handle "BioHub" hub with "update" method
+                        if hub_name == "BioHub" and method_type == "update":
+                            console.print(f"│ [bright_green]🚨 ATTENDANCE UPDATE DETECTED![/bright_green]")
                             
+                            # The data might be in a different format
+                            # Let's try to fetch fresh data when we get this signal
+                            self._handle_biohub_update()
+                            
+            elif isinstance(data, list):
+                console.print(f"│ [yellow]📦 ARRAY DATA: {json.dumps(data)[:100]}...[/yellow]")
+                
         except json.JSONDecodeError:
             if self.verbose:
-                console.print("│ [yellow]⚠️  DATA: Invalid JSON packet[/yellow]")
-    
+                console.print(f"│ [red]❌ Invalid JSON[/red]")
+
+    def _handle_biohub_update(self):
+        """Handle BioHub update signal - fetch fresh data"""
+        console.print("│ [blue]🔄 BioHub signal received, processing update...[/blue]")
+        
+        # Since the SignalR message doesn't contain the actual data,
+        # we need to notify callbacks to refresh their data
+        for callback in self.callbacks:
+            try:
+                # Pass a special signal to indicate refresh needed
+                callback({'type': 'refresh_signal', 'timestamp': datetime.now().isoformat()})
+            except Exception as e:
+                if self.verbose:
+                    console.print(f"│ [red]⚠️  CALLBACK ERROR: {e}[/red]")   
+
     def on_error(self, ws, error):
         """Handle WebSocket errors with reconnection logic"""
         if self.verbose:
@@ -247,7 +269,7 @@ class NIASignalRMonitor:
     def _send_join_message(self):
         """Send join message"""
         join_message = {
-            "H": "biohub",
+            "H": "BioHub",
             "M": "Join", 
             "A": [],
             "I": self._get_next_message_id()
@@ -322,7 +344,7 @@ class NIASignalRMonitor:
     def _build_websocket_url(self, connection_token):
         """Build WebSocket URL with connection token"""
         encoded_token = quote(connection_token)
-        connection_data = quote('[{"name":"biohub"}]')
+        connection_data = quote('[{"name":"BioHub"}]')
         
         url = (f"wss://attendance.caraga.nia.gov.ph/signalr/connect"
                f"?transport=webSockets"
@@ -940,7 +962,7 @@ class NIAAttendanceMonitor:
             
             console.print(Align.center(f"🌐 NIA ATTENDANCE - LIVE MONITOR"))
             console.print(Align.center(f"{get_live_indicator()} • Update #{update_count}"))
-            console.print("═" * 70)
+            console.print("═" * 59)
             
             stats = [
                 f"📅 {datetime.now().strftime('%Y-%m-%d')}",
@@ -949,11 +971,11 @@ class NIAAttendanceMonitor:
                 f"👤 {employee_id}"
             ]
             console.print(f"│ [cyan]{' | '.join(stats)}[/cyan]")
-            console.print("─" * 70)
+            console.print("─" * 59)
             
             self._display_current_attendance_hacker(current_attendance, employee_id)
             
-            console.print("─" * 70)
+            console.print("─" * 59)
             elapsed = time.time() - last_update
             status = "EXCELLENT" if elapsed < 2 else "GOOD" if elapsed < 5 else "SLOW"
             console.print(f"│ [dim]📊 Connection: {status} | Last update: {elapsed:.1f}s ago[/dim]")
@@ -1006,10 +1028,10 @@ class NIAAttendanceMonitor:
 
     def start_live_stream(self, employee_id, password, on_attendance_update, verbose=False):
         """Minimalist live stream that shows only new events"""
-        console.print("\n" + "═" * 70)
+        console.print("\n" + "═" * 59)
         console.print(Align.center("📡 NIA ATTENDANCE - LIVE STREAM"))
         console.print(Align.center("🎯 REAL-TIME EVENTS ONLY"))
-        console.print("═" * 70)
+        console.print("═" * 59)
         
         if not self.login(employee_id, password):
             return False
@@ -1063,7 +1085,7 @@ class NIAAttendanceMonitor:
                 console.print("│ [green]✅ LIVE STREAM: Started[/green]")
                 console.print("│ [dim]💡 Waiting for real-time events...[/dim]")
                 console.print("│ [dim]💡 Press Ctrl+C to stop stream[/dim]")
-                console.print("─" * 70)
+                console.print("─" * 59)
             else:
                 console.print("│ [red]❌ LIVE STREAM: Failed to connect[/red]")
                 return False
@@ -1423,7 +1445,21 @@ class NIAAttendanceMonitor:
             console.print(f"│ [red]⚠️  Save error: {e}[/red]")
 
 def handle_signalr_attendance_update(attendance_data):
-    """Callback for real-time updates"""
+    """Enhanced callback that handles both data and refresh signals"""
+    
+    if isinstance(attendance_data, dict) and attendance_data.get('type') == 'refresh_signal':
+        # This is a refresh signal from BioHub
+        console.print()
+        console.print("═" * 59)
+        console.print(Align.center("🔄 BIOHUB REFRESH SIGNAL"))
+        console.print("─" * 59)
+        console.print(f"│ [bright_green]🎯 ATTENDANCE: New scan detected![/bright_green]")
+        console.print(f"│ [dim]📡 Signal received at: {datetime.now().strftime('%H:%M:%S')}[/dim]")
+        console.print("│ [yellow]💡 The system should refresh automatically...[/yellow]")
+        console.print("─" * 59)
+        return
+    
+    # Original handling for actual attendance data
     console.print()
     console.print("═" * 59)
     console.print(Align.center("⚡ REAL-TIME BIOMETRIC UPDATE"))
@@ -1457,7 +1493,6 @@ def handle_signalr_attendance_update(attendance_data):
     console.print(f"│ [dim]📡 SIGNAL: {datetime.now().strftime('%H:%M:%S')}[/dim]")
     console.print("│ [dim]🔍 SYSTEM: Continuing surveillance...[/dim]")
     console.print("─" * 59)
-
 def main():
     # Show startup banner
     console.print("\n")
