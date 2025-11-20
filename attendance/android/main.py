@@ -782,10 +782,10 @@ class NIAAttendanceMonitor:
 
     def start_signalr_monitor(self, employee_id, password, on_attendance_update, verbose=False):
         """Start real-time SignalR WebSocket monitoring with auto-reconnect"""
-        console.print("\n" + "═" * 70)
+        console.print("\n" + "═" * 59)
         console.print(Align.center("🚀 NIA ATTENDANCE MONITOR - REAL-TIME MODE"))
         console.print(Align.center("🔐 SECURE CONNECTION WITH AUTO-RECONNECT"))
-        console.print("═" * 70)
+        console.print("═" * 59)
         
         # First, login to get session cookies
         if not self.login(employee_id, password):
@@ -817,7 +817,7 @@ class NIAAttendanceMonitor:
         if signalr_monitor.connect(connection_token):
             console.print("│ [green]✅ SIGNALR: Real-time channel active[/green]")
             console.print("│ [dim]💡 CONTROLS: Press Ctrl+C to terminate connection[/dim]")
-            console.print("─" * 70)
+            console.print("─" * 59)
             
             try:
                 # Keep main thread alive, monitor connection status
@@ -1035,7 +1035,7 @@ class NIAAttendanceMonitor:
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         uptime = self.get_system_uptime()
         
-        console.print("\n" + "═" * 70)
+        console.print("\n" + "═" * 59)
         
         # Main title
         console.print(Align.center(f"🚀 {title}"))
@@ -1044,7 +1044,7 @@ class NIAAttendanceMonitor:
         status_line = f"🕒 {current_time} | ⏱️  Uptime: {uptime} | 👤 {self.employee_id}"
         console.print(Align.center(f"[dim]{status_line}[/dim]"))
         
-        console.print("═" * 70)
+        console.print("═" * 59)
 
 def handle_signalr_attendance_update(attendance_data):
     """Callback for real-time updates - hacker style"""
