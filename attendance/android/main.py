@@ -1086,7 +1086,7 @@ class NIAAttendanceMonitor:
         return True
 
     def start_signalr_monitor(self, employee_id, password, on_attendance_update, verbose=False):
-        """Enhanced real-time monitoring with manual controls"""
+        """Enhanced real-time monitoring with SIMPLE and RELIABLE input handling"""
         console.print("\n" + "═" * 70)
         console.print(Align.center("🚀 NIA ATTENDANCE MONITOR - ENHANCED MODE"))
         console.print(Align.center("🎮 LIVE UPDATES + MANUAL CONTROLS"))
@@ -1097,6 +1097,7 @@ class NIAAttendanceMonitor:
             return False
         
         def refresh_display():
+            """Helper function to refresh the display"""
             current_attendance = self.get_attendance_data(employee_id)
             if current_attendance:
                 console.clear()
@@ -1106,11 +1107,13 @@ class NIAAttendanceMonitor:
                 return True
             return False
         
+        # Initial display
         console.print("│ [blue]📡 LOADING: Initial attendance data...[/blue]")
         if not refresh_display():
             console.print("│ [red]❌ Failed to load initial data[/red]")
             return False
         
+        # Try SignalR connection
         connection_token = self.get_signalr_connection_token()
         signalr_monitor = None
         
@@ -1151,20 +1154,47 @@ class NIAAttendanceMonitor:
                 
                 console.print(f"│ [dim]{status_line}[/dim]")
                 
-                # Simple input method
+                # SIMPLE AND RELIABLE INPUT METHOD
                 try:
-                    console.print("│ [bright_black]Press ENTER for refresh, type Q to quit: [/bright_black]", end="", flush=True)
-                    user_input = input().strip().lower()
+                    # Clear any previous input
+                    import sys
+                    while sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+                        sys.stdin.readline()
                     
-                    if user_input == 'q':
+                    console.print("│ [bright_black]Command (R/C/L/Q): [/bright_black]", end="", flush=True)
+                    
+                    # Use simple input with timeout
+                    key = None
+                    start_time = time.time()
+                    
+                    while time.time() - start_time < 10:  # 10 second timeout
+                        if sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
+                            key = sys.stdin.readline().strip().lower()
+                            break
+                    
+                    # Clear the input line
+                    console.print("\r│ " + " " * 50 + "\r", end="")
+                    
+                    if not key:
+                        # Auto-refresh every 10 minutes
+                        if time.time() - last_refresh > 600:
+                            refresh_count += 1
+                            console.print("│ [dim]🔄 AUTO: Refreshing data (10min interval)...[/dim]")
+                            refresh_display()
+                            last_refresh = time.time()
+                            console.print("─" * 70)
+                        continue
+                    
+                    # Process the key press
+                    if key == 'q':
                         break
-                    elif user_input == 'r' or user_input == '':
+                    elif key == 'r':
                         refresh_count += 1
                         console.print("│ [yellow]🔄 MANUAL: Refreshing data...[/yellow]")
                         if refresh_display():
                             console.print("│ [green]✅ REFRESH: Complete![/green]")
                         last_refresh = time.time()
-                    elif user_input == 'c':
+                    elif key == 'c':
                         console.print("│ [blue]🔍 CONNECTION CHECK:[/blue]")
                         console.print(f"│   API: ✅ Active")
                         if signalr_monitor:
@@ -1173,8 +1203,9 @@ class NIAAttendanceMonitor:
                             console.print(f"│   Last signal: {time.time() - signalr_monitor.last_message_time:.1f}s ago")
                         else:
                             console.print("│   SignalR: ❌ Not available")
-                    elif user_input == 'l':
+                    elif key == 'l':
                         console.print("│ [cyan]🧪 LIVE TEST: Simulating real-time update...[/cyan]")
+                        # Create a test update
                         test_data = {
                             'Name': 'TEST USER',
                             'DateTimeStamp': '/Date(' + str(int(time.time() * 1000)) + ')/',
@@ -1182,9 +1213,13 @@ class NIAAttendanceMonitor:
                             'AccessResult': 1
                         }
                         on_attendance_update(test_data)
+                    elif key == '':
+                        # Show quick reminder
+                        console.print("│ [cyan]💡 Quick: R=Refresh C=Check L=Test Q=Quit[/cyan]")
                     else:
-                        console.print(f"│ [yellow]⚠️  Unknown command. Use R/C/L/Q[/yellow]")
+                        console.print(f"│ [yellow]⚠️  Unknown command '{key}'. Use R/C/L/Q[/yellow]")
                     
+                    # Redisplay controls section
                     console.print("─" * 70)
                     
                 except KeyboardInterrupt:
@@ -1192,8 +1227,9 @@ class NIAAttendanceMonitor:
                 except Exception as e:
                     if verbose:
                         console.print(f"│ [red]⚠️  INPUT ERROR: {e}[/red]")
+                    # Fallback: wait and continue
                     time.sleep(1)
-                    
+                        
         except KeyboardInterrupt:
             console.print("\n│ [yellow]⚠️  USER: Termination signal received[/yellow]")
         
@@ -1203,7 +1239,6 @@ class NIAAttendanceMonitor:
         
         console.print("│ [green]✅ SYSTEM: Monitor terminated successfully[/green]")
         return True
-
     def real_time_monitor(self, employee_id, password, poll_interval=10):
         """Real-time monitoring with frequent API polls"""
         console.print("\n" + "═" * 70)
