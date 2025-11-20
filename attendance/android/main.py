@@ -865,7 +865,7 @@ class NIAAttendanceMonitor:
                             break
                         # Show countdown
                         remaining = 10 - int(time.time() - start_time)
-                        console.print(f"\n│ [bright_black]Command (R/C/L/Q) [{remaining}s]: [/bright_black]", end="")
+                        console.print(f"\r│ [bright_black]Command (R/C/L/Q) [{remaining}s]: [/bright_black]", end="")
                     
                     console.print()  # New line after input
                     
