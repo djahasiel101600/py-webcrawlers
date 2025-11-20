@@ -790,10 +790,10 @@ class NIAAttendanceMonitor:
 
     def start_live_dashboard(self, employee_id, password, on_attendance_update, verbose=False):
         """True live dashboard with automatic updates"""
-        console.print("\n" + "═" * 70)
+        console.print("\n" + "═" * 59)
         console.print(Align.center("🚀 NIA ATTENDANCE - LIVE DASHBOARD"))
         console.print(Align.center("📊 REAL-TIME UPDATES • AUTO-REFRESH"))
-        console.print("═" * 70)
+        console.print("═" * 59)
         
         if not self.login(employee_id, password):
             console.print("│ [red]🚨 ABORT: Authentication failed[/red]")
@@ -824,7 +824,7 @@ class NIAAttendanceMonitor:
             console.clear()
             
             console.print(Align.center(f"🚀 NIA ATTENDANCE - LIVE DASHBOARD • Update #{update_count}"))
-            console.print("═" * 70)
+            console.print("═" * 59)
             
             status_elements = []
             status_elements.append(f"🕒 {datetime.now().strftime('%H:%M:%S')}")
@@ -834,7 +834,7 @@ class NIAAttendanceMonitor:
                 status_elements.append(f"🆕 {len(new_records)} new")
             
             console.print(f"│ [cyan]{' | '.join(status_elements)}[/cyan]")
-            console.print("─" * 70)
+            console.print("─" * 59)
             
             self._display_current_attendance_hacker(current_attendance, employee_id)
             
@@ -845,7 +845,7 @@ class NIAAttendanceMonitor:
                     status_icon = "✅" if record.status == "ACCESS_GRANTED" else "❌"
                     console.print(f"│   {status_icon} {record.employee_name} at {time_str}")
             
-            console.print("─" * 70)
+            console.print("─" * 59)
             console.print("│ [dim]💡 Live updates active • Ctrl+C to stop[/dim]")
             
             return True
@@ -905,10 +905,10 @@ class NIAAttendanceMonitor:
 
     def start_animated_live_display(self, employee_id, password, on_attendance_update, verbose=False):
         """Animated live display with visual indicators"""
-        console.print("\n" + "═" * 70)
+        console.print("\n" + "═" * 59)
         console.print(Align.center("🌐 NIA ATTENDANCE - LIVE MONITOR"))
         console.print(Align.center("📡 REAL-TIME • ANIMATED • AUTO-UPDATING"))
-        console.print("═" * 70)
+        console.print("═" * 59)
         
         if not self.login(employee_id, password):
             return False
@@ -1425,9 +1425,9 @@ class NIAAttendanceMonitor:
 def handle_signalr_attendance_update(attendance_data):
     """Callback for real-time updates"""
     console.print()
-    console.print("═" * 70)
+    console.print("═" * 59)
     console.print(Align.center("⚡ REAL-TIME BIOMETRIC UPDATE"))
-    console.print("─" * 70)
+    console.print("─" * 59)
     
     if isinstance(attendance_data, dict):
         employee_name = attendance_data.get('Name', 'UNKNOWN_USER')
@@ -1456,7 +1456,7 @@ def handle_signalr_attendance_update(attendance_data):
         
     console.print(f"│ [dim]📡 SIGNAL: {datetime.now().strftime('%H:%M:%S')}[/dim]")
     console.print("│ [dim]🔍 SYSTEM: Continuing surveillance...[/dim]")
-    console.print("─" * 70)
+    console.print("─" * 59)
 
 def main():
     # Show startup banner
@@ -1587,9 +1587,9 @@ def main():
     if choice == "1":
         result = monitor.one_time_check(employee_id, password)
         if result:
-            console.print("═" * 70)
+            console.print("═" * 59)
             console.print(Align.center("✅ CHECK COMPLETE"))
-            console.print("─" * 70)
+            console.print("─" * 59)
             
             analysis = result['analysis']
             console.print(f"│ Your records: {analysis.get('total_records', 0)}")
