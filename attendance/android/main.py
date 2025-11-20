@@ -782,10 +782,10 @@ class NIAAttendanceMonitor:
 
     def start_signalr_monitor(self, employee_id, password, on_attendance_update, verbose=False):
         """Enhanced real-time monitoring with better refresh controls"""
-        console.print("\n" + "═" * 70)
+        console.print("\n" + "═" * 59)
         console.print(Align.center("🚀 NIA ATTENDANCE MONITOR - ENHANCED MODE"))
         console.print(Align.center("🎮 LIVE UPDATES + MANUAL CONTROLS"))
-        console.print("═" * 70)
+        console.print("═" * 59)
         
         if not self.login(employee_id, password):
             console.print("│ [red]🚨 ABORT: Authentication failed[/red]")
@@ -797,7 +797,7 @@ class NIAAttendanceMonitor:
             if current_attendance:
                 console.clear()
                 console.print(Align.center("🔄 DISPLAY REFRESHED"))
-                console.print("─" * 70)
+                console.print("─" * 59)
                 self._display_current_attendance_hacker(current_attendance, employee_id)
                 return True
             return False
@@ -834,7 +834,7 @@ class NIAAttendanceMonitor:
             console.print("│ [dim]💡 Real-time updates: ACTIVE[/dim]")
         else:
             console.print("│ [dim]💡 Real-time updates: INACTIVE[/dim]")
-        console.print("─" * 70)
+        console.print("─" * 59)
         
         last_refresh = time.time()
         refresh_count = 0
@@ -907,7 +907,7 @@ class NIAAttendanceMonitor:
                         console.print("│ [yellow]⚠️  Unknown command. Use R/C/L/Q[/yellow]")
                     
                     # Redisplay controls
-                    console.print("─" * 70)
+                    console.print("─" * 59)
                     
                 except KeyboardInterrupt:
                     break
