@@ -719,7 +719,7 @@ class NIAAttendanceMonitor:
         console.print("│ [blue]🌐 SIGNALR: Establishing real-time channel...[/blue]")
         
         if signalr_monitor.connect(connection_token):
-            console.print("│ [59n]✅ SIGNALR: Real-time channel active[/green]")
+            console.print("│ [green]✅ SIGNALR: Real-time channel active[/green]")
             console.print("│ [dim]💡 CONTROLS: Press Ctrl+C to terminate connection[/dim]")
             console.print("─" * 59)
             
@@ -953,7 +953,7 @@ def main():
     console.print("\n")
     console.print(Align.center("┌─────────────────────────────────────────────────────┐"))
     console.print(Align.center("│              NIA ATTENDANCE MONITOR v2.0            │"))
-    console.print(Align.center("│             [red]SECURE BIOMETRIC SURVEILLANCE[/red]          │"))
+    console.print(Align.center("│             [red]SECURE BIOMETRIC SURVEILLANCE[/red]         │"))
     console.print(Align.center("└─────────────────────────────────────────────────────┘"))
     console.print()
     
