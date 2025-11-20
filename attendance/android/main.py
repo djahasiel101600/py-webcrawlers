@@ -849,7 +849,7 @@ class NIAAttendanceMonitor:
                     status_line += " | ⚡ MANUAL"
                 
                 console.print(f"│ [dim]{status_line}[/dim]")
-                console.print("│ [bright_black]Command (R/C/L/Q): [/bright_black]", end="")
+                console.print("\n│ [bright_black]Command (R/C/L/Q): [/bright_black]", end="")
                 
                 try:
                     # Get user input with timeout
