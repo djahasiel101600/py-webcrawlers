@@ -128,7 +128,7 @@ class NIASignalRMonitor:
             data = json.loads(message)
             
             # Log the raw message structure
-            console.print(f"│ [cyan]📨 INCOMING: {type(data)} - Keys: {list(data.keys()) if isinstance(data, dict) else 'N/A'}[/cyan]")
+            console.print(f"\n│ [cyan]📨 INCOMING: {type(data)} - Keys: {list(data.keys()) if isinstance(data, dict) else 'N/A'}[/cyan]")
             
             # If it's a dict, log all important keys
             if isinstance(data, dict):
