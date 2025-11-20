@@ -1,10 +1,8 @@
-import psutil
-import time
-from datetime import timedelta
+# main.py
 import websocket
-import re
-import json
 import requests
+import json
+import re
 import threading
 import time
 import random
@@ -30,10 +28,10 @@ from dataclasses import dataclass
 
 console = Console()
 
-# Set up logging with hacker-style formatting
+# Set up logging with Rich handler for mobile-friendly output
 logging.basicConfig(
     level=logging.INFO,
-    format="[dim]│[/dim] %(message)s",
+    format="%(message)s",
     datefmt="%H:%M:%S",
     handlers=[RichHandler(console=console, rich_tracebacks=True, markup=True, show_path=False)]
 )
@@ -107,7 +105,7 @@ class NIASignalRMonitor:
         self.session_cookies = session_cookies
         self.ws = None
         self.is_connected = False
-        self.should_reconnect = True  # Control flag
+        self.should_reconnect = True
         self.callbacks = []
         self.message_id = 0
         self.verbose = verbose
@@ -115,6 +113,7 @@ class NIASignalRMonitor:
         self.max_reconnect_attempts = 10
         self.last_message_time = time.time()
         self.connection_id = None
+        self.connection_token = None
         
     def add_callback(self, callback):
         """Add a callback function for attendance updates"""
@@ -122,42 +121,42 @@ class NIASignalRMonitor:
             self.callbacks.append(callback)
     
     def on_message(self, ws, message):
-        """Enhanced debug version - logs EVERYTHING"""
+        """Handle incoming WebSocket messages with enhanced logging"""
         try:
             self.last_message_time = time.time()
             data = json.loads(message)
             
-            # Log the raw message structure
-            console.print(f"\n│ [cyan]📨 INCOMING: {type(data)} - Keys: {list(data.keys()) if isinstance(data, dict) else 'N/A'}[/cyan]")
+            # Log all message types for debugging
+            if self.verbose:
+                console.print(f"│ [dim]📨 SIGNALR: {json.dumps(data)[:100]}...[/dim]")
             
-            # If it's a dict, log all important keys
             if isinstance(data, dict):
-                for key, value in data.items():
-                    if key in ['M', 'C', 'S', 'I']:  # SignalR specific keys
-                        console.print(f"│ [dim]   {key}: {str(value)[:50]}...[/dim]")
+                if 'C' in data:
+                    self.connection_id = data['C']
                 
-                # Process methods if present
-                if 'M' in data and isinstance(data['M'], list):
-                    for method in data['M']:
-                        hub = method.get('H', 'Unknown')
-                        method_name = method.get('M', 'Unknown')
-                        console.print(f"│ [green]🎯 METHOD: {hub}.{method_name}[/green]")
+                if 'M' in data:
+                    methods = data.get('M', [])
+                    for method in methods:
+                        method_name = method.get('H')
+                        method_type = method.get('M')
+                        method_args = method.get('A', [])
                         
-                        # Trigger on ANY method from biohub/attendancehub
-                        if hub.lower() in ['biohub', 'attendancehub']:
-                            self._handle_attendance_update(method.get('A', []))
+                        console.print(f"│ [dim]📡 HUB: {method_name}, METHOD: {method_type}[/dim]")
+                        
+                        if method_name == "biohub" and method_type in ["attendanceUpdate", "newRecord"]:
+                            self._handle_attendance_update(method_args)
+                            self.reconnect_attempts = 0
                             
-        except Exception as e:
-            console.print(f"│ [red]❌ MESSAGE ERROR: {e}[/red]")
-            console.print(f"│ [red]   Raw message: {message}[/red]")
-
+        except json.JSONDecodeError:
+            if self.verbose:
+                console.print("│ [yellow]⚠️  DATA: Invalid JSON packet[/yellow]")
+    
     def on_error(self, ws, error):
         """Handle WebSocket errors with reconnection logic"""
         if self.verbose:
             console.print(f"│ [red]🚨 CONNECTION ERROR: {error}[/red]")
         self.is_connected = False
         
-        # Auto-reconnect unless manually stopped
         if self.should_reconnect and self.reconnect_attempts < self.max_reconnect_attempts:
             self._schedule_reconnect()
     
@@ -166,13 +165,11 @@ class NIASignalRMonitor:
         console.print(f"│ [yellow]🔌 CONNECTION CLOSED: Code {close_status_code}[/yellow]")
         self.is_connected = False
         
-        # Don't reconnect if we intentionally closed or too many attempts
         if (close_status_code == 1000 or 
             self.reconnect_attempts >= self.max_reconnect_attempts or
             not self.should_reconnect):
             return
             
-        # Auto-reconnect for unexpected closures
         self._schedule_reconnect()
     
     def on_open(self, ws):
@@ -182,8 +179,6 @@ class NIASignalRMonitor:
         self.reconnect_attempts = 0
         self.last_message_time = time.time()
         self._send_join_message()
-        
-        # Start keep-alive monitoring
         self._start_keep_alive()
     
     def _schedule_reconnect(self):
@@ -192,11 +187,10 @@ class NIASignalRMonitor:
             return
             
         self.reconnect_attempts += 1
-        delay = min(30, 2 ** self.reconnect_attempts)  # Exponential backoff, max 30 seconds
-        
+        delay = min(30, 2 ** self.reconnect_attempts)
+
         console.print(f"│ [yellow]🔄 RECONNECT: Attempt {self.reconnect_attempts}/{self.max_reconnect_attempts} in {delay}s[/yellow]")
         
-        # Schedule reconnection
         threading.Timer(delay, self._reconnect).start()
     
     def _reconnect(self):
@@ -209,35 +203,32 @@ class NIASignalRMonitor:
         self.connect(self.connection_token)
     
     def _start_keep_alive(self):
-        """Start keep-alive monitoring to detect dead connections"""
+        """Start keep-alive monitoring"""
         def keep_alive_monitor():
             while self.is_connected and self.should_reconnect:
-                time.sleep(30)  # Check every 30 seconds
+                time.sleep(30)
                 
                 if not self.is_connected:
                     break
                     
-                # If no messages received in 2 minutes, connection might be dead
                 idle_time = time.time() - self.last_message_time
-                if idle_time > 120:  # 2 minutes without messages
+                if idle_time > 120:
                     console.print("│ [yellow]⚠️  KEEP-ALIVE: Connection appears idle, forcing reconnect[/yellow]")
                     self.ws.close()
                     break
                     
-                # Send ping if supported (some SignalR implementations)
-                if idle_time > 60:  # 1 minute idle
+                if idle_time > 60:
                     self._send_keep_alive()
         
         threading.Thread(target=keep_alive_monitor, daemon=True).start()
     
     def _send_keep_alive(self):
-        """Send keep-alive message if the protocol supports it"""
+        """Send keep-alive message"""
         try:
-            # Some SignalR implementations support ping
             ping_message = {"H": "biohub", "M": "ping", "A": [], "I": self._get_next_message_id()}
             self._send_message(ping_message)
         except:
-            pass  # Ping not supported, that's OK
+            pass
     
     def _handle_attendance_update(self, args):
         """Process real-time attendance updates"""
@@ -282,16 +273,14 @@ class NIASignalRMonitor:
         return self.message_id
     
     def connect(self, connection_token):
-        """Connect to SignalR WebSocket with reconnection support"""
+        """Connect to SignalR WebSocket"""
         try:
-            self.connection_token = connection_token  # Store for reconnections
+            self.connection_token = connection_token
             
             console.print("│ [blue]🌐 INITIATING: SignalR handshake...[/blue]")
             
-            # Build WebSocket URL with connection token
             websocket_url = self._build_websocket_url(connection_token)
             
-            # Prepare headers with cookies
             cookie_header = '; '.join([f'{k}={v}' for k, v in self.session_cookies.items()])
             
             headers = {
@@ -301,7 +290,6 @@ class NIASignalRMonitor:
                 'Referer': f'{self.base_url}/Attendance'
             }
             
-            # Create WebSocket connection
             self.ws = websocket.WebSocketApp(
                 websocket_url,
                 on_message=self.on_message,
@@ -311,19 +299,17 @@ class NIASignalRMonitor:
                 header=headers
             )
             
-            # Run in background thread
             def run_websocket():
-                self.ws.run_forever(ping_interval=30, ping_timeout=10)  # Added WebSocket ping
+                self.ws.run_forever(ping_interval=30, ping_timeout=10)
             
             thread = threading.Thread(target=run_websocket)
             thread.daemon = True
             thread.start()
             
-            # Wait for connection
             for i in range(15):
                 if self.is_connected:
                     return True
-                if not self.should_reconnect:  # Check if user wants to stop
+                if not self.should_reconnect:
                     return False
                 time.sleep(1)
             
@@ -350,7 +336,7 @@ class NIASignalRMonitor:
     def disconnect(self):
         """Disconnect WebSocket gracefully"""
         console.print("│ [yellow]🔒 DISCONNECTING: Secure channel...[/yellow]")
-        self.should_reconnect = False  # Stop auto-reconnect
+        self.should_reconnect = False
         self.is_connected = False
         
         if self.ws:
@@ -367,7 +353,6 @@ class NIAAttendanceMonitor:
         self.session = requests.Session()
         self.state_file = os.path.expanduser('~/.nia_monitor_state.json')
         
-        # Set common headers
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'X-Requested-With': 'XMLHttpRequest'
@@ -383,7 +368,6 @@ class NIAAttendanceMonitor:
                 console.print("│ [green]📁 STATE: Session data loaded[/green]")
             else:
                 self.state = {'last_check': None, 'known_records': []}
-                console.print("│ [yellow]📁 STATE: New session initialized[/yellow]")
         except Exception as e:
             console.print(f"│ [red]⚠️  STATE LOAD ERROR: {e}[/red]")
             self.state = {'last_check': None, 'known_records': []}
@@ -421,23 +405,19 @@ class NIAAttendanceMonitor:
         }
 
     def login(self, employee_id, password):
-        """Login to the NIA system with hacker style"""
+        """Login to the NIA system"""
         try:
             console.print("│ [blue]🔐 AUTH: Accessing NIA portal...[/blue]")
             
-            # Get login page for token
             response = self.session.get(self.auth_url)
             
-            # Extract verification token
             token_match = re.search(r'name="__RequestVerificationToken".*?value="([^"]+)"', response.text)
             if not token_match:
                 console.print("│ [red]🚨 AUTH: Security token not found[/red]")
                 return False
             
             token = token_match.group(1)
-            console.print("│ [green]🔑 AUTH: Security token acquired[/green]")
             
-            # Prepare login data
             login_data = {
                 'EmployeeId': employee_id,
                 'Password': password,
@@ -447,10 +427,8 @@ class NIAAttendanceMonitor:
             
             console.print("│ [yellow]⏳ AUTH: Verifying credentials...[/yellow]")
             
-            # Perform login
             response = self.session.post(self.auth_url, data=login_data, allow_redirects=True)
             
-            # Check if login was successful
             if response.status_code == 200 and employee_id in response.text:
                 console.print("│ [green]✅ AUTH: Access granted[/green]")
                 return True
@@ -463,7 +441,7 @@ class NIAAttendanceMonitor:
             return False
     
     def get_attendance_data(self, employee_id, year=None, month=None, length=50):
-        """Get attendance data via API with hacker style"""
+        """Get attendance data via API"""
         if not year:
             year = datetime.now().year
         if not month:
@@ -471,9 +449,6 @@ class NIAAttendanceMonitor:
         
         url = f"{self.base_url}/Attendance/IndexData/{year}?month={month}&eid={employee_id}"
         
-        console.print(f"│ [blue]📡 QUERY: Fetching attendance records...[/blue]")
-        
-        # DataTables server-side processing parameters
         data = {
             "draw": "1",
             "columns[0][data]": "Id",
@@ -532,10 +507,8 @@ class NIAAttendanceMonitor:
             
             console.print(f"│ [green]✅ DATA: {len(api_data.get('data', []))} records retrieved[/green]")
             
-            # Convert to our record format
             records = [AttendanceRecord.from_api_data(record) for record in api_data.get('data', [])]
             
-            # Process changes and optional CSV saving
             return self._process_attendance_data(records, employee_id, api_data)
             
         except requests.exceptions.RequestException as e:
@@ -547,7 +520,6 @@ class NIAAttendanceMonitor:
         if records:
             changes = self.detect_changes(records)
             
-            # Conditional CSV saving
             if self.config.get('enable_csv', False):
                 self.save_as_csv(records, employee_id, changes)
         
@@ -558,7 +530,7 @@ class NIAAttendanceMonitor:
         }
 
     def save_as_csv(self, records, employee_id, changes):
-        """Save attendance data as CSV (optional)"""
+        """Save attendance data as CSV"""
         if not self.config.get('enable_csv', False):
             return None
             
@@ -566,7 +538,6 @@ class NIAAttendanceMonitor:
             filename = f"attendance_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
 
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-                # Write metadata as comments
                 csvfile.write("# NIA Attendance Export (API)\n")
                 csvfile.write(f"# Generated: {datetime.now().isoformat()}\n")
                 csvfile.write(f"# Employee: {employee_id}\n")
@@ -574,10 +545,8 @@ class NIAAttendanceMonitor:
                 csvfile.write(f"# New Records: {len(changes['new_records'])}\n#\n")
                 
                 writer = csv.writer(csvfile)
-                # Write headers
                 writer.writerow(['Date Time', 'Temperature', 'Employee ID', 'Employee Name', 'Machine Name', 'Status'])
                 
-                # Write all records
                 for record in records:
                     writer.writerow([
                         record.date_time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -596,7 +565,7 @@ class NIAAttendanceMonitor:
             return None
     
     def analyze_attendance_patterns(self, attendance_data, employee_id):
-        """Analyze attendance patterns with hacker style"""
+        """Analyze attendance patterns"""
         try:
             if not attendance_data or 'records' not in attendance_data:
                 return None
@@ -607,7 +576,6 @@ class NIAAttendanceMonitor:
                 console.print("│ [yellow]📊 ANALYSIS: No records to analyze[/yellow]")
                 return None
             
-            # Filter records for this employee
             my_records = [r for r in records if r.employee_id == employee_id]
             failed_records = [r for r in my_records if r.status == "ACCESS_DENIED"]
             
@@ -615,11 +583,9 @@ class NIAAttendanceMonitor:
                 console.print("│ [yellow]📊 ANALYSIS: No personal records found[/yellow]")
                 return None
             
-            # Parse today's records
             today = datetime.now().date()
             today_records = [r for r in my_records if r.date_time.date() == today]
             
-            # Analysis with hacker style
             console.print("│ [blue]🔍 ANALYSIS: Scanning biometric patterns...[/blue]")
             
             if today_records:
@@ -646,18 +612,15 @@ class NIAAttendanceMonitor:
             return None
 
     def get_signalr_connection_token(self):
-        """Get SignalR connection token with hacker style"""
+        """Get SignalR connection token"""
         try:
             console.print("│ [blue]🔧 SIGNALR: Acquiring connection token...[/blue]")
             
-            # Try to get the attendance page which should set the proper cookies
             response = self.session.get(f"{self.base_url}/Attendance")
             
-            # Method 1: Check if token is in Set-Cookie header
             if 'Set-Cookie' in response.headers:
                 set_cookie = response.headers['Set-Cookie']
                 
-                # Look for connection token in cookies
                 token_patterns = [
                     r'connectionToken=([^;]+)',
                     r'SignalR\.ConnectionToken=([^;]+)',
@@ -668,10 +631,9 @@ class NIAAttendanceMonitor:
                     match = re.search(pattern, set_cookie)
                     if match:
                         token = match.group(1)
-                        console.print(f"│ [green]✅ TOKEN: Acquired from headers[/green]")
+                        console.print("│ [green]✅ TOKEN: Acquired from headers[/green]")
                         return token
             
-            # Method 2: SignalR negotiation
             console.print("│ [yellow]🔧 SIGNALR: Attempting negotiation protocol...[/yellow]")
             return self._try_signalr_negotiation()
             
@@ -680,12 +642,10 @@ class NIAAttendanceMonitor:
             return None
 
     def _try_signalr_negotiation(self):
-        """Try to negotiate with SignalR server to get connection token"""
+        """Try to negotiate with SignalR server"""
         try:
-            # SignalR negotiation URL (common pattern)
             negotiate_url = f"{self.base_url}/signalr/negotiate"
             
-            # Common SignalR negotiation parameters
             params = {
                 'clientProtocol': '2.1',
                 'connectionData': '[{"name":"biohub"}]',
@@ -704,13 +664,11 @@ class NIAAttendanceMonitor:
             if response.status_code == 200:
                 negotiation_data = response.json()
                 
-                # The connection token should be in the response
                 if 'ConnectionToken' in negotiation_data:
                     token = negotiation_data['ConnectionToken']
                     console.print("│ [green]✅ TOKEN: Negotiation successful[/green]")
                     return token
                 elif 'Url' in negotiation_data:
-                    # Some SignalR setups return a URL with the token
                     url = negotiation_data['Url']
                     token_match = re.search(r'connectionToken=([^&]+)', url)
                     if token_match:
@@ -731,7 +689,6 @@ class NIAAttendanceMonitor:
         if not records:
             return None
             
-        # Compact table for mobile
         table = Table(
             show_header=True, 
             header_style="bold bright_white",
@@ -750,7 +707,6 @@ class NIAAttendanceMonitor:
             time_str = record.date_time.strftime("%H:%M")
             temp_str = f"{record.temperature:.1f}" if record.temperature else "N/A"
             
-            # Hacker-style status indicators
             if record.status == "ACCESS_GRANTED":
                 status_display = "GRANTED"
                 auth_display = "✅"
@@ -769,7 +725,6 @@ class NIAAttendanceMonitor:
                 style=row_style
             )
         
-        # Wrap table in a panel
         panel = Panel(
             Align.center(table),
             title=f"🔒 {title}",
@@ -780,35 +735,382 @@ class NIAAttendanceMonitor:
         
         return panel
 
+    def _display_current_attendance_hacker(self, attendance_data, employee_id):
+        """Display current day's attendance in hacker style"""
+        analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
+        
+        if not analysis:
+            console.print("│ [yellow]📭 STATUS: No analyzable data available[/yellow]")
+            return
+        
+        today_records = analysis.get('today_details', [])
+        
+        summary_text = Text()
+        summary_text.append("📊 TODAY'S ACTIVITY: ", style="bold")
+        summary_text.append(f"{len(today_records)} records", style="green")
+        summary_text.append(" | ", style="dim")
+        summary_text.append(f"{analysis.get('failed_records', 0)} denied", style="red" if analysis.get('failed_records', 0) > 0 else "dim")
+        
+        console.print(Panel(
+            summary_text,
+            border_style="bright_blue",
+            width=66
+        ))
+        
+        if today_records:
+            table_panel = self._create_hacker_table(today_records, "TODAY'S BIOMETRIC LOG")
+            console.print(table_panel)
+            
+            if len(today_records) == 0:
+                status = "🚨 NO ACTIVITY DETECTED"
+                style = "bright_red"
+            elif len(today_records) == 1:
+                status = "⏳ AWAITING EXIT SCAN"
+                style = "bright_yellow"
+            elif len(today_records) % 2 == 0:
+                status = "✅ SESSION COMPLETE"
+                style = "bright_green"
+            else:
+                status = "⚠️  INCOMPLETE SESSION"
+                style = "bright_yellow"
+                
+            console.print(Panel(
+                Align.center(Text(status, style=style)),
+                border_style=style,
+                width=66
+            ))
+        else:
+            console.print(Panel(
+                Align.center("📭 NO RECORDS FOUND FOR TODAY"),
+                border_style="yellow",
+                width=66
+            ))
+
+    # ==================== LIVE DISPLAY METHODS ====================
+
+    def start_live_dashboard(self, employee_id, password, on_attendance_update, verbose=False):
+        """True live dashboard with automatic updates"""
+        console.print("\n" + "═" * 70)
+        console.print(Align.center("🚀 NIA ATTENDANCE - LIVE DASHBOARD"))
+        console.print(Align.center("📊 REAL-TIME UPDATES • AUTO-REFRESH"))
+        console.print("═" * 70)
+        
+        if not self.login(employee_id, password):
+            console.print("│ [red]🚨 ABORT: Authentication failed[/red]")
+            return False
+        
+        last_records = []
+        update_count = 0
+        signalr_updates = 0
+        
+        def refresh_live_display():
+            nonlocal update_count, last_records
+            
+            current_attendance = self.get_attendance_data(employee_id)
+            if not current_attendance or 'records' not in current_attendance:
+                return False
+            
+            current_records = current_attendance['records']
+            
+            new_records = []
+            if last_records:
+                current_hashes = [self._hash_record(r) for r in current_records]
+                last_hashes = [self._hash_record(r) for r in last_records]
+                new_records = [r for r in current_records if self._hash_record(r) not in last_hashes]
+            
+            last_records = current_records
+            update_count += 1
+            
+            console.clear()
+            
+            console.print(Align.center(f"🚀 NIA ATTENDANCE - LIVE DASHBOARD • Update #{update_count}"))
+            console.print("═" * 70)
+            
+            status_elements = []
+            status_elements.append(f"🕒 {datetime.now().strftime('%H:%M:%S')}")
+            status_elements.append(f"🔄 {update_count} updates")
+            status_elements.append(f"📡 {signalr_updates} real-time")
+            if new_records:
+                status_elements.append(f"🆕 {len(new_records)} new")
+            
+            console.print(f"│ [cyan]{' | '.join(status_elements)}[/cyan]")
+            console.print("─" * 70)
+            
+            self._display_current_attendance_hacker(current_attendance, employee_id)
+            
+            if new_records:
+                console.print("│ [green]🎉 NEW RECORDS DETECTED:[/green]")
+                for record in new_records[-3:]:
+                    time_str = record.date_time.strftime('%H:%M:%S')
+                    status_icon = "✅" if record.status == "ACCESS_GRANTED" else "❌"
+                    console.print(f"│   {status_icon} {record.employee_name} at {time_str}")
+            
+            console.print("─" * 70)
+            console.print("│ [dim]💡 Live updates active • Ctrl+C to stop[/dim]")
+            
+            return True
+        
+        def enhanced_attendance_update(attendance_data):
+            nonlocal signalr_updates
+            signalr_updates += 1
+            
+            console.print(f"│ [bright_green]🎯 LIVE: {attendance_data.get('Name', 'Unknown')} scanned at {datetime.now().strftime('%H:%M:%S')}[/bright_green]")
+            refresh_live_display()
+        
+        console.print("│ [blue]📡 INIT: Starting live dashboard...[/blue]")
+        refresh_live_display()
+        
+        connection_token = self.get_signalr_connection_token()
+        signalr_monitor = None
+        
+        if connection_token:
+            cookies_dict = {c.name: c.value for c in self.session.cookies}
+            signalr_monitor = NIASignalRMonitor(self.base_url, cookies_dict, verbose=verbose)
+            signalr_monitor.add_callback(enhanced_attendance_update)
+            
+            if signalr_monitor.connect(connection_token):
+                console.print("│ [green]✅ SIGNALR: Real-time feed active[/green]")
+            else:
+                console.print("│ [yellow]⚠️  SIGNALR: Using auto-refresh only[/yellow]")
+                signalr_monitor = None
+        else:
+            console.print("│ [yellow]⚠️  SIGNALR: Using auto-refresh only[/yellow]")
+        
+        console.print("│ [dim]🔄 Starting auto-refresh every 30 seconds...[/dim]")
+        
+        try:
+            last_auto_refresh = time.time()
+            
+            while True:
+                current_time = time.time()
+                
+                if current_time - last_auto_refresh >= 30:
+                    if signalr_monitor and signalr_monitor.is_connected:
+                        last_auto_refresh = current_time
+                    else:
+                        refresh_live_display()
+                        last_auto_refresh = current_time
+                
+                time.sleep(1)
+                
+        except KeyboardInterrupt:
+            console.print("\n│ [yellow]🛑 LIVE DASHBOARD: Stopping...[/yellow]")
+        
+        finally:
+            if signalr_monitor:
+                signalr_monitor.disconnect()
+        
+        console.print("│ [green]✅ LIVE DASHBOARD: Stopped[/green]")
+        return True
+
+    def start_animated_live_display(self, employee_id, password, on_attendance_update, verbose=False):
+        """Animated live display with visual indicators"""
+        console.print("\n" + "═" * 70)
+        console.print(Align.center("🌐 NIA ATTENDANCE - LIVE MONITOR"))
+        console.print(Align.center("📡 REAL-TIME • ANIMATED • AUTO-UPDATING"))
+        console.print("═" * 70)
+        
+        if not self.login(employee_id, password):
+            return False
+        
+        spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        spinner_index = 0
+        last_update = time.time()
+        update_count = 0
+        
+        def get_live_indicator():
+            nonlocal spinner_index
+            spinner_index = (spinner_index + 1) % len(spinner)
+            elapsed = time.time() - last_update
+            if elapsed < 5:
+                return f"[green]{spinner[spinner_index]} LIVE[/green]"
+            elif elapsed < 15:
+                return f"[yellow]{spinner[spinner_index]} CONNECTING[/yellow]"
+            else:
+                return f"[red]{spinner[spinner_index]} OFFLINE[/red]"
+        
+        def refresh_animated_display():
+            nonlocal last_update, update_count
+            
+            current_attendance = self.get_attendance_data(employee_id)
+            if not current_attendance:
+                return False
+            
+            console.clear()
+            
+            console.print(Align.center(f"🌐 NIA ATTENDANCE - LIVE MONITOR"))
+            console.print(Align.center(f"{get_live_indicator()} • Update #{update_count}"))
+            console.print("═" * 70)
+            
+            stats = [
+                f"📅 {datetime.now().strftime('%Y-%m-%d')}",
+                f"🕒 {datetime.now().strftime('%H:%M:%S')}", 
+                f"🔄 {update_count}",
+                f"👤 {employee_id}"
+            ]
+            console.print(f"│ [cyan]{' | '.join(stats)}[/cyan]")
+            console.print("─" * 70)
+            
+            self._display_current_attendance_hacker(current_attendance, employee_id)
+            
+            console.print("─" * 70)
+            elapsed = time.time() - last_update
+            status = "EXCELLENT" if elapsed < 2 else "GOOD" if elapsed < 5 else "SLOW"
+            console.print(f"│ [dim]📊 Connection: {status} | Last update: {elapsed:.1f}s ago[/dim]")
+            console.print(f"│ [dim]💡 Auto-refresh: 30s | Real-time: ACTIVE | Ctrl+C to stop[/dim]")
+            
+            last_update = time.time()
+            update_count += 1
+            return True
+        
+        def animated_attendance_update(attendance_data):
+            nonlocal last_update
+            last_update = time.time()
+            
+            employee_name = attendance_data.get('Name', 'Unknown')
+            status = "ACCESS_GRANTED" if attendance_data.get('AccessResult') == 1 else "ACCESS_DENIED"
+            icon = "✅" if status == "ACCESS_GRANTED" else "❌"
+            
+            console.print(f"│ [bright_green]🎯 {icon} {employee_name} - {datetime.now().strftime('%H:%M:%S')}[/bright_green]")
+            refresh_animated_display()
+        
+        refresh_animated_display()
+        
+        connection_token = self.get_signalr_connection_token()
+        signalr_monitor = None
+        
+        if connection_token:
+            cookies_dict = {c.name: c.value for c in self.session.cookies}
+            signalr_monitor = NIASignalRMonitor(self.base_url, cookies_dict, verbose=verbose)
+            signalr_monitor.add_callback(animated_attendance_update)
+            signalr_monitor.connect(connection_token)
+        
+        console.print("│ [green]🚀 LIVE DISPLAY: Active[/green]")
+        
+        try:
+            while True:
+                if time.time() - last_update > 30:
+                    refresh_animated_display()
+                
+                time.sleep(0.5)
+                
+        except KeyboardInterrupt:
+            console.print("\n│ [yellow]🛑 Stopping live display...[/yellow]")
+        
+        finally:
+            if signalr_monitor:
+                signalr_monitor.disconnect()
+        
+        console.print("│ [green]✅ Live display stopped[/green]")
+        return True
+
+    def start_live_stream(self, employee_id, password, on_attendance_update, verbose=False):
+        """Minimalist live stream that shows only new events"""
+        console.print("\n" + "═" * 70)
+        console.print(Align.center("📡 NIA ATTENDANCE - LIVE STREAM"))
+        console.print(Align.center("🎯 REAL-TIME EVENTS ONLY"))
+        console.print("═" * 70)
+        
+        if not self.login(employee_id, password):
+            return False
+        
+        current_data = self.get_attendance_data(employee_id)
+        if current_data:
+            known_records = set(self._hash_record(r) for r in current_data['records'])
+        else:
+            known_records = set()
+        
+        event_count = 0
+        
+        def handle_live_event(attendance_data):
+            nonlocal event_count, known_records
+            
+            event_count += 1
+            employee_name = attendance_data.get('Name', 'Unknown')
+            date_time_str = attendance_data.get('DateTimeStamp', '')
+            temperature = attendance_data.get('Temperature')
+            status = "ACCESS_GRANTED" if attendance_data.get('AccessResult') == 1 else "ACCESS_DENIED"
+            
+            date_time = AttendanceRecord.parse_net_date(date_time_str)
+            
+            event_record = AttendanceRecord.from_api_data(attendance_data)
+            record_hash = self._hash_record(event_record)
+            
+            if record_hash not in known_records:
+                known_records.add(record_hash)
+                
+                console.print(f"│ [bright_cyan]🎯 EVENT #{event_count}[/bright_cyan]")
+                console.print(f"│   👤 [bold]{employee_name}[/bold]")
+                console.print(f"│   🕒 {date_time.strftime('%H:%M:%S')}")
+                if temperature:
+                    console.print(f"│   🌡️  {temperature}°C")
+                console.print(f"│   🔐 [{'green' if status == 'ACCESS_GRANTED' else 'red'}]{status}[/{'green' if status == 'ACCESS_GRANTED' else 'red'}]")
+                console.print(f"│   📍 {attendance_data.get('MachineName', 'Unknown')}")
+                console.print("│ ──────────────────────────────────────────")
+            
+            if event_count % 10 == 0:
+                console.print(f"│ [dim]📊 Stream active: {event_count} events received[/dim]")
+        
+        connection_token = self.get_signalr_connection_token()
+        signalr_monitor = None
+        
+        if connection_token:
+            cookies_dict = {c.name: c.value for c in self.session.cookies}
+            signalr_monitor = NIASignalRMonitor(self.base_url, cookies_dict, verbose=verbose)
+            signalr_monitor.add_callback(handle_live_event)
+            
+            if signalr_monitor.connect(connection_token):
+                console.print("│ [green]✅ LIVE STREAM: Started[/green]")
+                console.print("│ [dim]💡 Waiting for real-time events...[/dim]")
+                console.print("│ [dim]💡 Press Ctrl+C to stop stream[/dim]")
+                console.print("─" * 70)
+            else:
+                console.print("│ [red]❌ LIVE STREAM: Failed to connect[/red]")
+                return False
+        else:
+            console.print("│ [red]❌ LIVE STREAM: No connection token[/red]")
+            return False
+        
+        try:
+            while True:
+                time.sleep(1)
+                
+        except KeyboardInterrupt:
+            console.print("\n│ [yellow]🛑 LIVE STREAM: Stopping...[/yellow]")
+        
+        finally:
+            if signalr_monitor:
+                signalr_monitor.disconnect()
+        
+        console.print(f"│ [green]✅ LIVE STREAM: Ended with {event_count} events[/green]")
+        return True
+
     def start_signalr_monitor(self, employee_id, password, on_attendance_update, verbose=False):
-        """Enhanced real-time monitoring with better refresh controls"""
-        console.print("\n" + "═" * 59)
+        """Enhanced real-time monitoring with manual controls"""
+        console.print("\n" + "═" * 70)
         console.print(Align.center("🚀 NIA ATTENDANCE MONITOR - ENHANCED MODE"))
         console.print(Align.center("🎮 LIVE UPDATES + MANUAL CONTROLS"))
-        console.print("═" * 59)
+        console.print("═" * 70)
         
         if not self.login(employee_id, password):
             console.print("│ [red]🚨 ABORT: Authentication failed[/red]")
             return False
         
         def refresh_display():
-            """Helper function to refresh the display"""
             current_attendance = self.get_attendance_data(employee_id)
             if current_attendance:
                 console.clear()
                 console.print(Align.center("🔄 DISPLAY REFRESHED"))
-                console.print("─" * 59)
+                console.print("─" * 70)
                 self._display_current_attendance_hacker(current_attendance, employee_id)
                 return True
             return False
         
-        # Initial display
         console.print("│ [blue]📡 LOADING: Initial attendance data...[/blue]")
         if not refresh_display():
             console.print("│ [red]❌ Failed to load initial data[/red]")
             return False
         
-        # Try SignalR connection
         connection_token = self.get_signalr_connection_token()
         signalr_monitor = None
         
@@ -834,14 +1136,13 @@ class NIAAttendanceMonitor:
             console.print("│ [dim]💡 Real-time updates: ACTIVE[/dim]")
         else:
             console.print("│ [dim]💡 Real-time updates: INACTIVE[/dim]")
-        console.print("─" * 59)
+        console.print("─" * 70)
         
         last_refresh = time.time()
         refresh_count = 0
         
         try:
             while True:
-                # Show status line
                 status_line = f"🕒 {datetime.now().strftime('%H:%M:%S')} | 🔄 {refresh_count} refreshes"
                 if signalr_monitor and signalr_monitor.is_connected:
                     status_line += " | 📡 LIVE"
@@ -849,35 +1150,21 @@ class NIAAttendanceMonitor:
                     status_line += " | ⚡ MANUAL"
                 
                 console.print(f"│ [dim]{status_line}[/dim]")
-                console.print("\n│ [bright_black]Command (R/C/L/Q): [/bright_black]", end="")
                 
+                # Simple input method
                 try:
-                    # Get user input with timeout
-                    import select
-                    import sys
+                    console.print("│ [bright_black]Press ENTER for refresh, type Q to quit: [/bright_black]", end="", flush=True)
+                    user_input = input().strip().lower()
                     
-                    start_time = time.time()
-                    key = ""
-                    
-                    while time.time() - start_time < 10:  # 10 second timeout
-                        if sys.stdin in select.select([sys.stdin], [], [], 1)[0]:
-                            key = sys.stdin.readline().strip().lower()
-                            break
-                        # Show countdown
-                        remaining = 10 - int(time.time() - start_time)
-                        console.print(f"\r│ [bright_black]Command (R/C/L/Q) [{remaining}s]: [/bright_black]", end="")
-                    
-                    console.print()  # New line after input
-                    
-                    if key == 'q':
+                    if user_input == 'q':
                         break
-                    elif key == 'r':
+                    elif user_input == 'r' or user_input == '':
                         refresh_count += 1
                         console.print("│ [yellow]🔄 MANUAL: Refreshing data...[/yellow]")
                         if refresh_display():
                             console.print("│ [green]✅ REFRESH: Complete![/green]")
                         last_refresh = time.time()
-                    elif key == 'c':
+                    elif user_input == 'c':
                         console.print("│ [blue]🔍 CONNECTION CHECK:[/blue]")
                         console.print(f"│   API: ✅ Active")
                         if signalr_monitor:
@@ -886,9 +1173,8 @@ class NIAAttendanceMonitor:
                             console.print(f"│   Last signal: {time.time() - signalr_monitor.last_message_time:.1f}s ago")
                         else:
                             console.print("│   SignalR: ❌ Not available")
-                    elif key == 'l':
+                    elif user_input == 'l':
                         console.print("│ [cyan]🧪 LIVE TEST: Simulating real-time update...[/cyan]")
-                        # Create a test update
                         test_data = {
                             'Name': 'TEST USER',
                             'DateTimeStamp': '/Date(' + str(int(time.time() * 1000)) + ')/',
@@ -896,18 +1182,10 @@ class NIAAttendanceMonitor:
                             'AccessResult': 1
                         }
                         on_attendance_update(test_data)
-                    elif key == '':
-                        # Auto-refresh every 10 minutes
-                        if time.time() - last_refresh > 600:
-                            refresh_count += 1
-                            console.print("│ [dim]🔄 AUTO: Refreshing data (10min interval)...[/dim]")
-                            refresh_display()
-                            last_refresh = time.time()
                     else:
-                        console.print("│ [yellow]⚠️  Unknown command. Use R/C/L/Q[/yellow]")
+                        console.print(f"│ [yellow]⚠️  Unknown command. Use R/C/L/Q[/yellow]")
                     
-                    # Redisplay controls
-                    console.print("─" * 59)
+                    console.print("─" * 70)
                     
                 except KeyboardInterrupt:
                     break
@@ -925,69 +1203,13 @@ class NIAAttendanceMonitor:
         
         console.print("│ [green]✅ SYSTEM: Monitor terminated successfully[/green]")
         return True
-    
-    def _display_current_attendance_hacker(self, attendance_data, employee_id):
-        """Display current day's attendance in hacker style"""
-        analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
-        
-        if not analysis:
-            console.print("│ [yellow]📭 STATUS: No analyzable data available[/yellow]")
-            return
-        
-        today_records = analysis.get('today_details', [])
-        
-        # Display summary in hacker style
-        summary_text = Text()
-        summary_text.append("📊 TODAY'S ACTIVITY: ", style="bold bright_white")
-        summary_text.append(f"{len(today_records)} records", style="green")
-        summary_text.append(" | ", style="dim")
-        summary_text.append(f"{analysis.get('failed_records', 0)} denied", style="red" if analysis.get('failed_records', 0) > 0 else "dim")
-        
-        console.print(Panel(
-            summary_text,
-            border_style="bright_blue",
-            width=66
-        ))
-        
-        # Display records in compact hacker table
-        if today_records:
-            table_panel = self._create_hacker_table(today_records, "TODAY'S BIOMETRIC LOG")
-            console.print(table_panel)
-            
-            # Quick analysis
-            if len(today_records) == 0:
-                status = "🚨 NO ACTIVITY DETECTED"
-                style = "bright_red"
-            elif len(today_records) == 1:
-                status = "⏳ AWAITING EXIT SCAN"
-                style = "bright_yellow"
-            elif len(today_records) % 2 == 0:
-                status = "✅ SESSION COMPLETE"
-                style = "bright_green"
-            else:
-                status = "⚠️  INCOMPLETE SESSION"
-                style = "bright_yellow"
-                
-            console.print(Panel(
-                Align.center(Text(status, style=style)),
-                border_style=style,
-                width=66
-            ))
-        else:
-            console.print(Panel(
-                Align.center("📭 NO RECORDS FOUND FOR TODAY"),
-                border_style="yellow",
-                width=66
-            ))
-        
-        console.print("│ [dim]🔍 SYSTEM: Monitoring for real-time updates...[/dim]")
 
     def real_time_monitor(self, employee_id, password, poll_interval=10):
-        """Real-time monitoring with frequent API polls - hacker style"""
-        console.print("\n" + "═" * 59)
+        """Real-time monitoring with frequent API polls"""
+        console.print("\n" + "═" * 70)
         console.print(Align.center("🔄 NIA ATTENDANCE MONITOR - POLLING MODE"))
         console.print(Align.center(f"📡 POLLING INTERVAL: {poll_interval}s"))
-        console.print("═" * 59)
+        console.print("═" * 70)
         
         if not self.login(employee_id, password):
             return
@@ -1004,18 +1226,15 @@ class NIAAttendanceMonitor:
                     analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
                     current_count = len(attendance_data.get('records', []))
                     
-                    # Clear and update display
-                    console.clear59
+                    console.clear()
                     console.print(Align.center(f"🔍 LIVE MONITOR - SCAN #{check_count}"))
-                    console.print("─" * 59)
+                    console.print("─" * 70)
                     
-                    # Show real-time status
                     console.print(f"│ [dim]🕒 LAST SCAN: {datetime.now().strftime('%H:%M:%S')}[/dim]")
                     
                     if analysis and analysis.get('today_details'):
                         today_records = analysis['today_details']
                         
-                        # Real-time alerts for new records
                         if current_count > last_records_count and last_records_count > 0:
                             new_records = current_count - last_records_count
                             console.print(Panel(
@@ -1026,11 +1245,9 @@ class NIAAttendanceMonitor:
                         
                         last_records_count = current_count
                         
-                        # Display today's records in hacker table
                         table_panel = self._create_hacker_table(today_records, "LIVE BIOMETRIC FEED")
                         console.print(table_panel)
                         
-                        # Real-time insights
                         insights = []
                         if len(today_records) == 0:
                             insights.append("🚨 NO ACTIVITY TODAY")
@@ -1061,7 +1278,6 @@ class NIAAttendanceMonitor:
                         width=66
                     ))
                 
-                # Countdown with hacker style
                 console.print("\n│ [dim]💡 CONTROLS: Press Q to terminate monitoring[/dim]")
                 start_time = time.time()
 
@@ -1070,11 +1286,8 @@ class NIAAttendanceMonitor:
                     if remaining <= 0:
                         break
                         
-                    # Cool countdown display
-                    countdown_text = f"⏳ NEXT SCAN IN {remaining:02d}s"
-                    console.print(f"│ [cyan]{countdown_text}[/cyan]", end="\r")
+                    console.print(f"│ [cyan]⏳ NEXT SCAN IN {remaining:02d}s[/cyan]", end="\r")
                     
-                    # Check for quit command
                     try:
                         import select
                         import sys
@@ -1088,54 +1301,171 @@ class NIAAttendanceMonitor:
                     except:
                         time.sleep(1)
 
-                console.print()  # New line after countdown
+                console.print()
                     
         except KeyboardInterrupt:
             console.print("\n│ [yellow]⚠️  USER: Termination signal received[/yellow]")
         
         console.print("│ [green]✅ SYSTEM: Polling monitor terminated[/green]")
 
-    def get_system_uptime(self):
-        """Get system uptime in human readable format"""
-        try:
-            boot_time = psutil.boot_time()
-            uptime_seconds = time.time() - boot_time
-            uptime = timedelta(seconds=int(uptime_seconds))
+    def interactive_monitor(self, employee_id, password, interval_seconds=300):
+        """Interactive monitoring with API"""
+        console.print("\n" + "═" * 70)
+        console.print(Align.center("🚀 NIA ATTENDANCE MONITOR - INTERACTIVE MODE"))
+        console.print("═" * 70)
+        
+        if not self.login(employee_id, password):
+            console.print("│ [red]Login failed![/red]")
+            return
+        
+        check_count = 0
+        
+        while True:
+            console.clear()
+            console.print(Align.center(f"🔍 INTERACTIVE MONITOR - CHECK #{check_count + 1}"))
+            console.print("─" * 70)
             
-            # Format as days, hours, minutes
-            days = uptime.days
-            hours, remainder = divmod(uptime.seconds, 3600)
-            minutes, _ = divmod(remainder, 60)
+            console.print("│ [yellow]🔄 Fetching attendance data...[/yellow]")
             
-            if days > 0:
-                return f"{days}d {hours}h {minutes}m"
+            attendance_data = self.get_attendance_data(employee_id)
+            
+            if attendance_data:
+                check_count += 1
+                analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
+                
+                if analysis and analysis.get('today_details'):
+                    table = Table(show_header=True, header_style="bold cyan", width=60)
+                    table.add_column("#", justify="right", style="white", width=4)
+                    table.add_column("Time", style="green", width=15)
+                    table.add_column("Temp", style="yellow", width=6)
+                    table.add_column("Status", style="magenta", width=8)
+                    
+                    for idx, record in enumerate(analysis['today_details'], start=1):
+                        time_str = record.date_time.strftime("%H:%M:%S")
+                        temp_str = f"{record.temperature:.1f}" if record.temperature else "N/A"
+                        status = record.status
+                        
+                        row_style = "red" if status == "ACCESS_DENIED" else None
+                        table.add_row(str(idx), time_str, temp_str, status, style=row_style)
+                    
+                    console.print(table)
+                    console.print(f"│ [green]✅ {len(analysis['today_details'])} records today[/green]")
+                else:
+                    console.print("│ [yellow]📭 No records for today[/yellow]")
             else:
-                return f"{hours}h {minutes}m"
-        except:
-            return "N/A"
+                console.print("│ [red]❌ Failed to fetch data[/red]")
+            
+            console.print(f"│ [dim]🕒 Check #{check_count} at {datetime.now().strftime('%H:%M:%S')}[/dim]")
+            console.print("│ [bold]R[/bold]efresh [bold]S[/bold]ave [bold]Q[/bold]uit")
+            
+            try:
+                key = console.input("\n│ Command: ").lower().strip()
+                
+                if key == 'q':
+                    break
+                elif key == 's':
+                    if attendance_data and self.config.get('enable_csv', False):
+                        full_data = self.get_attendance_data(employee_id, length=100)
+                        if full_data:
+                            console.print("│ [green]✅ Data saved[/green]")
+                        console.input("│ Press Enter to continue...")
+                    else:
+                        console.print("│ [yellow]⚠️  CSV export disabled[/yellow]")
+                        console.input("│ Press Enter to continue...")
+                elif key == 'r':
+                    continue
+                else:
+                    console.print("│ [yellow]⚠️  Use R, S, or Q[/yellow]")
+                    console.input("│ Press Enter to continue...")
+                    
+            except KeyboardInterrupt:
+                console.print("\n│ [yellow]🛑 Stopping monitor...[/yellow]")
+                break
+        
+        console.print("│ [green]✅ Interactive monitor stopped[/green]")
 
-    def display_status_header(self, title="NIA ATTENDANCE MONITOR"):
-        """Display header with system info"""
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        uptime = self.get_system_uptime()
+    def one_time_check(self, employee_id, password):
+        """Single check with API"""
+        if not self.login(employee_id, password):
+            return None
+            
+        attendance_data = self.get_attendance_data(employee_id)
+        if attendance_data:
+            analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
+            if not analysis:
+                analysis = {
+                    'employee_id': employee_id,
+                    'total_records': 0,
+                    'total_all_records': len(attendance_data.get('records', [])),
+                    'today_records': 0,
+                    'today_details': [],
+                    'failed_records': 0
+                }
+            return {
+                'analysis': analysis,
+                'attendance_data': attendance_data
+            }
+        return None
+
+    def monitor_attendance(self, employee_id, password, interval_seconds=300, max_checks=None, interactive=False):
+        """Monitor attendance with optional interactive mode"""
+        if interactive:
+            return self.interactive_monitor(employee_id, password, interval_seconds)
         
-        console.print("\n" + "═" * 59)
+        logging.info(f"Monitoring every {interval_seconds}s")
+        checks = 0
         
-        # Main title
-        console.print(Align.center(f"🚀 {title}"))
+        if not self.login(employee_id, password):
+            return
         
-        # System info line
-        status_line = f"🕒 {current_time} | ⏱️  Uptime: {uptime} | 👤 {self.employee_id}"
-        console.print(Align.center(f"[dim]{status_line}[/dim]"))
-        
-        console.print("═" * 59)
+        try:
+            while True:
+                attendance_data = self.get_attendance_data(employee_id)
+                
+                if attendance_data:
+                    analysis = self.analyze_attendance_patterns(attendance_data, employee_id)
+                    if analysis:
+                        self.save_attendance_record(analysis)
+                else:
+                    logging.warning("No data this cycle")
+
+                checks += 1
+                if max_checks and checks >= max_checks:
+                    logging.info(f"Reached {max_checks} checks")
+                    break
+
+                time.sleep(interval_seconds)
+                
+        except KeyboardInterrupt:
+            logging.info("Stopped by user")
+    
+    def save_attendance_record(self, attendance_data):
+        """Save attendance data to JSON backup"""
+        try:
+            filename = f"nia_attendance_backup_{datetime.now().strftime('%Y%m')}.json"
+            
+            if os.path.exists(filename):
+                with open(filename, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            else:
+                data = []
+            
+            data.append(attendance_data)
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            
+            console.print(f"│ [green]✅ Saved to {filename}[/green]")
+            
+        except Exception as e:
+            console.print(f"│ [red]⚠️  Save error: {e}[/red]")
 
 def handle_signalr_attendance_update(attendance_data):
-    """Callback for real-time updates - hacker style"""
+    """Callback for real-time updates"""
     console.print()
-    console.print("═" * 59)
+    console.print("═" * 70)
     console.print(Align.center("⚡ REAL-TIME BIOMETRIC UPDATE"))
-    console.print("─" * 59)
+    console.print("─" * 70)
     
     if isinstance(attendance_data, dict):
         employee_name = attendance_data.get('Name', 'UNKNOWN_USER')
@@ -1143,10 +1473,8 @@ def handle_signalr_attendance_update(attendance_data):
         temperature = attendance_data.get('Temperature')
         status = "ACCESS_GRANTED" if attendance_data.get('AccessResult') == 1 else "ACCESS_DENIED"
         
-        # Parse .NET date
         date_time = AttendanceRecord.parse_net_date(date_time_str)
         
-        # Create hacker-style update display
         update_panel = Panel(
             Align.left(
                 Text().append("👤 USER: ", style="bold").append(f"{employee_name}\n", style="bright_white")
@@ -1166,25 +1494,26 @@ def handle_signalr_attendance_update(attendance_data):
         
     console.print(f"│ [dim]📡 SIGNAL: {datetime.now().strftime('%H:%M:%S')}[/dim]")
     console.print("│ [dim]🔍 SYSTEM: Continuing surveillance...[/dim]")
-    console.print("─" * 59)
+    console.print("─" * 70)
 
 def main():
+    # Show startup banner
     console.print("\n")
     console.print(Align.center("┌─────────────────────────────────────────────────────┐"))
-    console.print(Align.center("│              NIA ATTENDANCE MONITOR v2.0            │"))
-    console.print(Align.center("│             [red]SECURE BIOMETRIC SURVEILLANCE[/red]         │"))
+    console.print(Align.center("│              NIA ATTENDANCE MONITOR v3.0            │"))
+    console.print(Align.center("│               [red]SECURE BIOMETRIC SURVEILLANCE[/red]            │"))
     console.print(Align.center("└─────────────────────────────────────────────────────┘"))
     console.print()
     
     config = Config().load()
     
     parser = argparse.ArgumentParser(
-        description="NIA Attendance Monitor - API & Real-Time Version",
+        description="NIA Attendance Monitor - Live Display Version",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
         '--mode',
-        choices=['once', 'monitor', 'config'],
+        choices=['once', 'monitor', 'config', 'live', 'animated', 'stream'],
         help='Operation mode'
     )
     parser.add_argument(
@@ -1231,7 +1560,6 @@ def main():
     
     args = parser.parse_args()
 
-    # Update config with CSV setting
     if args.enable_csv:
         config['enable_csv'] = True
 
@@ -1250,7 +1578,7 @@ def main():
                 value = value.lower() == 'true'
             current_config[key] = value
         config_obj.save(current_config)
-        console.print("✓ Config updated")
+        console.print("│ [green]✅ Config updated[/green]")
         return
 
     monitor = NIAAttendanceMonitor(config=config)
@@ -1260,38 +1588,50 @@ def main():
                    os.environ.get('NIA_EMPLOYEE_ID') or 
                    config.get('employee_id'))
     if not employee_id:
-        employee_id = Prompt.ask("Employee ID")
+        employee_id = Prompt.ask("│ Employee ID")
         
     password = (args.password or 
                 os.environ.get('NIA_PASSWORD') or 
                 config.get('password'))
     if not password:
-        console.print("Password (hidden):")
-        password = getpass.getpass("")
+        console.print("│ Password (hidden):")
+        password = getpass.getpass("│ ")
     
     if args.mode:
-        choice = '1' if args.mode == 'once' else '2' if args.mode == 'monitor' else '3'
+        mode_map = {
+            'once': '1', 
+            'monitor': '2', 
+            'live': '3',
+            'animated': '4',
+            'stream': '5',
+            'config': '6'
+        }
+        choice = mode_map.get(args.mode, '1')
     else:
-        # Modified menu with hacker style
         console.print("\n[bold bright_white]OPERATION MODES:[/bold bright_white]")
         console.print("[bright_cyan]1.[/bright_cyan] 🔍 Quick System Scan")
         console.print("[bright_cyan]2.[/bright_cyan] 📡 Real-time Surveillance") 
-        console.print("[bright_cyan]3.[/bright_cyan] ⚙️  System Configuration")
+        console.print("[bright_cyan]3.[/bright_cyan] 🚀 Live Dashboard (Recommended)")
+        console.print("[bright_cyan]4.[/bright_cyan] 🌐 Animated Live Display")
+        console.print("[bright_cyan]5.[/bright_cyan] 📡 Live Event Stream")
+        console.print("[bright_cyan]6.[/bright_cyan] ⚙️  System Configuration")
         
         choice = Prompt.ask(
             "\n[bright_white]SELECT OPERATION[/bright_white]", 
-            choices=["1", "2", "3"], 
-            default="1"
+            choices=["1", "2", "3", "4", "5", "6"], 
+            default="3"
         )
-
+    
     if choice == "1":
         result = monitor.one_time_check(employee_id, password)
         if result:
-            console.rule("[green]COMPLETE[/green]")
+            console.print("═" * 70)
+            console.print(Align.center("✅ CHECK COMPLETE"))
+            console.print("─" * 70)
             
             analysis = result['analysis']
-            console.print(f"Your records: {analysis.get('total_records', 0)}")
-            console.print(f"Today: {analysis.get('today_records', 0)}")
+            console.print(f"│ Your records: {analysis.get('total_records', 0)}")
+            console.print(f"│ Today: {analysis.get('today_records', 0)}")
             
             today_details = analysis.get('today_details', [])
             if today_details:
@@ -1306,12 +1646,12 @@ def main():
                     temp_str = f"{record.temperature:.1f}" if record.temperature else "N/A"
                     status = record.status
                     
-                    row_style = "red" if status == "FAILED" else None
+                    row_style = "red" if status == "ACCESS_DENIED" else None
                     table.add_row(str(idx), time_str, temp_str, status, style=row_style)
                 
                 console.print(table)
         else:
-            console.print("[red]Check failed![/red]")
+            console.print("│ [red]❌ Check failed![/red]")
     
     elif choice == "2":
         if args.interactive:
@@ -1323,22 +1663,25 @@ def main():
             realtime_choice = Prompt.ask("Choose real-time mode", choices=["1", "2", "3"], default="1")
             
             if realtime_choice == "1":
-                # TRUE REAL-TIME with SignalR
-                monitor.start_signalr_monitor(employee_id, password, handle_signalr_attendance_update)
+                monitor.start_signalr_monitor(employee_id, password, handle_signalr_attendance_update, args.verbose)
             elif realtime_choice == "2":
                 monitor.real_time_monitor(employee_id, password, poll_interval=10)
             elif realtime_choice == "3":
                 monitor.interactive_monitor(employee_id, password, args.interval)
         else:
-            monitor.monitor_attendance(
-                employee_id,
-                password,
-                interval_seconds=args.interval,
-                interactive=args.interactive
-            )
+            monitor.start_signalr_monitor(employee_id, password, handle_signalr_attendance_update, args.verbose)
     
     elif choice == "3":
-        console.print("Config:")
+        monitor.start_live_dashboard(employee_id, password, handle_signalr_attendance_update, args.verbose)
+    
+    elif choice == "4":
+        monitor.start_animated_live_display(employee_id, password, handle_signalr_attendance_update, args.verbose)
+    
+    elif choice == "5":
+        monitor.start_live_stream(employee_id, password, handle_signalr_attendance_update, args.verbose)
+    
+    elif choice == "6":
+        console.print("│ Configuration:")
         console.print_json(json.dumps(config, indent=2))
 
 if __name__ == "__main__":
