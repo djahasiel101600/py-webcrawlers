@@ -127,7 +127,7 @@ class NIASignalRMonitor:
             data = json.loads(message)
             
             # Show raw message for debugging
-            console.print(f"│ [dim]📨 SIGNALR: {json.dumps(data)[:150]}...[/dim]")
+            # console.print(f"│ [dim]📨 SIGNALR: {json.dumps(data)[:150]}...[/dim]")
             
             if isinstance(data, dict):
                 # Update connection ID
