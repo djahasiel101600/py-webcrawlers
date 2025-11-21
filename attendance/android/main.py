@@ -177,21 +177,28 @@ class NIASignalRMonitor:
                     console.print(f"│ [red]⚠️  CALLBACK ERROR: {e}[/red]")   
 
     def on_error(self, ws, error):
-        """Enhanced error handling with smart reconnection"""
+        """Enhanced error handling with specific error types"""
         if self.verbose:
             console.print(f"│ [red]🚨 CONNECTION ERROR: {error}[/red]")
-        self.is_connected = False
         
+        self.is_connected = False
         self.consecutive_failures += 1
+        
+        # Check if this is a socket-related error
+        socket_errors = ['socket', 'already', 'opened', 'closed', 'broken']
+        is_socket_error = any(socket_err in str(error).lower() for socket_err in socket_errors)
+        
+        if is_socket_error:
+            console.print("│ [yellow]⚠️  Socket error detected, will attempt cleanup...[/yellow]")
         
         # Smart reconnection logic
         if self.should_reconnect and self.reconnect_attempts < self.max_reconnect_attempts:
-            if self.consecutive_failures >= 2:
-                # If we've failed twice in a row, try full re-authentication
-                console.print("│ [yellow]⚠️  Multiple failures detected, attempting re-authentication...[/yellow]")
+            if self.consecutive_failures >= 2 or is_socket_error:
+                # If socket errors or multiple failures, try full re-authentication
+                console.print("│ [yellow]⚠️  Attempting re-authentication...[/yellow]")
                 self._schedule_reconnect(full_reauth=True)
             else:
-                # First failure, try simple reconnect
+                # First failure, try simple reconnect with cleanup
                 self._schedule_reconnect()
 
     def on_close(self, ws, close_status_code, close_msg):
@@ -237,15 +244,25 @@ class NIASignalRMonitor:
         threading.Timer(delay, self._reconnect, kwargs={'full_reauth': full_reauth}).start()
 
     def _reconnect(self, full_reauth=False):
-        """Enhanced reconnect with full re-authentication option"""
+        """Enhanced reconnect with proper socket cleanup"""
         if not self.should_reconnect or self.reconnect_attempts >= self.max_reconnect_attempts:
             console.print("│ [red]🚨 RECONNECT: Maximum attempts reached[/red]")
             return
         
+        # Ensure the previous WebSocket is properly closed
+        if self.ws and hasattr(self.ws, 'sock') and self.ws.sock:
+            try:
+                console.print("│ [dim]🔧 Cleaning up previous WebSocket connection...[/dim]")
+                self.ws.close()
+                # Give it a moment to close properly
+                time.sleep(1)
+            except Exception as e:
+                if self.verbose:
+                    console.print(f"│ [yellow]⚠️  Cleanup warning: {e}[/yellow]")
+        
         if full_reauth and hasattr(self, 'employee_id') and hasattr(self, 'password'):
             console.print("│ [blue]🔄 RE-AUTH: Performing full re-authentication...[/blue]")
-            # We need to trigger a full re-authentication from the parent
-            # This will be handled by the enhanced callback system
+            # Trigger full re-authentication
             for callback in self.callbacks:
                 try:
                     callback({'type': 'reauth_required', 'employee_id': self.employee_id, 'password': self.password})
@@ -254,8 +271,10 @@ class NIASignalRMonitor:
                         console.print(f"│ [red]⚠️  REAUTH CALLBACK ERROR: {e}[/red]")
         else:
             console.print("│ [blue]🔄 RECONNECT: Attempting to re-establish connection...[/blue]")
+            # Use a small delay before reconnecting to ensure clean state
+            time.sleep(2)
             self.connect(self.connection_token)
-    
+
     def _start_keep_alive(self):
         """Start keep-alive monitoring"""
         def keep_alive_monitor():
@@ -327,14 +346,26 @@ class NIASignalRMonitor:
         return self.message_id
     
     def connect(self, connection_token):
-        """Connect to SignalR WebSocket"""
+        """Connect to SignalR WebSocket with improved state management"""
         try:
+            # Reset connection state
+            self.is_connected = False
             self.connection_token = connection_token
             
             console.print("│ [blue]🌐 INITIATING: SignalR handshake...[/blue]")
             
+            # Ensure any existing connection is closed
+            if self.ws:
+                try:
+                    self.ws.close()
+                except:
+                    pass
+                self.ws = None
+            
+            # Build WebSocket URL with connection token
             websocket_url = self._build_websocket_url(connection_token)
             
+            # Prepare headers with cookies
             cookie_header = '; '.join([f'{k}={v}' for k, v in self.session_cookies.items()])
             
             headers = {
@@ -344,6 +375,7 @@ class NIASignalRMonitor:
                 'Referer': f'{self.base_url}/Attendance'
             }
             
+            # Create new WebSocket connection
             self.ws = websocket.WebSocketApp(
                 websocket_url,
                 on_message=self.on_message,
@@ -353,26 +385,34 @@ class NIASignalRMonitor:
                 header=headers
             )
             
+            # Run in background thread
             def run_websocket():
-                self.ws.run_forever(ping_interval=30, ping_timeout=10)
+                try:
+                    self.ws.run_forever(ping_interval=30, ping_timeout=10)
+                except Exception as e:
+                    if self.verbose:
+                        console.print(f"│ [red]🚨 WebSocket thread error: {e}[/red]")
             
             thread = threading.Thread(target=run_websocket)
             thread.daemon = True
             thread.start()
             
-            for i in range(15):
+            # Wait for connection with timeout
+            for i in range(20):  # Increased timeout to 20 seconds
                 if self.is_connected:
                     return True
                 if not self.should_reconnect:
                     return False
                 time.sleep(1)
             
+            # If we get here, connection timed out
+            console.print("│ [red]🚨 CONNECTION: Timeout waiting for connection[/red]")
             return False
             
         except Exception as e:
             console.print(f"│ [red]🚨 CONNECTION FAILED: {e}[/red]")
             return False
-    
+ 
     def _build_websocket_url(self, connection_token):
         """Build WebSocket URL with connection token"""
         encoded_token = quote(connection_token)
@@ -388,16 +428,22 @@ class NIASignalRMonitor:
         return url
     
     def disconnect(self):
-        """Disconnect WebSocket gracefully"""
+        """Disconnect WebSocket gracefully with proper cleanup"""
         console.print("│ [yellow]🔒 DISCONNECTING: Secure channel...[/yellow]")
         self.should_reconnect = False
         self.is_connected = False
         
         if self.ws:
             try:
+                # Set a short timeout for graceful closure
                 self.ws.close()
-            except:
-                pass
+                # Wait a moment for the connection to close
+                time.sleep(2)
+            except Exception as e:
+                if self.verbose:
+                    console.print(f"│ [yellow]⚠️  Disconnect warning: {e}[/yellow]")
+            finally:
+                self.ws = None
 
 class NIAAttendanceMonitor:
     def __init__(self, config=None):
