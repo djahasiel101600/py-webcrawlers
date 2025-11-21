@@ -114,6 +114,9 @@ class NIASignalRMonitor:
         self.last_message_time = time.time()
         self.connection_id = None
         self.connection_token = None
+        self.employee_id = None
+        self.password = None
+        self.consecutive_failures = 0  # Track consecutive connection failures
         
     def add_callback(self, callback):
         """Add a callback function for attendance updates"""
@@ -174,14 +177,23 @@ class NIASignalRMonitor:
                     console.print(f"│ [red]⚠️  CALLBACK ERROR: {e}[/red]")   
 
     def on_error(self, ws, error):
-        """Handle WebSocket errors with reconnection logic"""
+        """Enhanced error handling with smart reconnection"""
         if self.verbose:
             console.print(f"│ [red]🚨 CONNECTION ERROR: {error}[/red]")
         self.is_connected = False
         
+        self.consecutive_failures += 1
+        
+        # Smart reconnection logic
         if self.should_reconnect and self.reconnect_attempts < self.max_reconnect_attempts:
-            self._schedule_reconnect()
-    
+            if self.consecutive_failures >= 2:
+                # If we've failed twice in a row, try full re-authentication
+                console.print("│ [yellow]⚠️  Multiple failures detected, attempting re-authentication...[/yellow]")
+                self._schedule_reconnect(full_reauth=True)
+            else:
+                # First failure, try simple reconnect
+                self._schedule_reconnect()
+
     def on_close(self, ws, close_status_code, close_msg):
         """Handle WebSocket closure with reconnection logic"""
         console.print(f"│ [yellow]🔌 CONNECTION CLOSED: Code {close_status_code}[/yellow]")
@@ -195,34 +207,54 @@ class NIASignalRMonitor:
         self._schedule_reconnect()
     
     def on_open(self, ws):
-        """Handle WebSocket connection opened"""
+        """Enhanced connection opened handler"""
         console.print("│ [green]🔓 SIGNALR: Secure channel established[/green]")
         self.is_connected = True
         self.reconnect_attempts = 0
+        self.consecutive_failures = 0  # Reset on successful connection
         self.last_message_time = time.time()
         self._send_join_message()
         self._start_keep_alive()
     
-    def _schedule_reconnect(self):
-        """Schedule reconnection with exponential backoff"""
+    def _schedule_reconnect(self, employee_id=None, password=None, full_reauth=False):
+        """Enhanced reconnection with optional full re-authentication"""
         if not self.should_reconnect:
             return
             
         self.reconnect_attempts += 1
         delay = min(30, 2 ** self.reconnect_attempts)
 
-        console.print(f"│ [yellow]🔄 RECONNECT: Attempt {self.reconnect_attempts}/{self.max_reconnect_attempts} in {delay}s[/yellow]")
+        if full_reauth:
+            console.print(f"│ [yellow]🔄 RE-AUTH: Full re-authentication in {delay}s (Attempt {self.reconnect_attempts}/10)[/yellow]")
+        else:
+            console.print(f"│ [yellow]🔄 RECONNECT: Attempt {self.reconnect_attempts}/10 in {delay}s[/yellow]")
         
-        threading.Timer(delay, self._reconnect).start()
-    
-    def _reconnect(self):
-        """Attempt to reconnect"""
+        # Store credentials for re-authentication if provided
+        if employee_id and password:
+            self.employee_id = employee_id
+            self.password = password
+        
+        threading.Timer(delay, self._reconnect, kwargs={'full_reauth': full_reauth}).start()
+
+    def _reconnect(self, full_reauth=False):
+        """Enhanced reconnect with full re-authentication option"""
         if not self.should_reconnect or self.reconnect_attempts >= self.max_reconnect_attempts:
             console.print("│ [red]🚨 RECONNECT: Maximum attempts reached[/red]")
             return
-            
-        console.print("│ [blue]🔄 RECONNECT: Attempting to re-establish connection...[/blue]")
-        self.connect(self.connection_token)
+        
+        if full_reauth and hasattr(self, 'employee_id') and hasattr(self, 'password'):
+            console.print("│ [blue]🔄 RE-AUTH: Performing full re-authentication...[/blue]")
+            # We need to trigger a full re-authentication from the parent
+            # This will be handled by the enhanced callback system
+            for callback in self.callbacks:
+                try:
+                    callback({'type': 'reauth_required', 'employee_id': self.employee_id, 'password': self.password})
+                except Exception as e:
+                    if self.verbose:
+                        console.print(f"│ [red]⚠️  REAUTH CALLBACK ERROR: {e}[/red]")
+        else:
+            console.print("│ [blue]🔄 RECONNECT: Attempting to re-establish connection...[/blue]")
+            self.connect(self.connection_token)
     
     def _start_keep_alive(self):
         """Start keep-alive monitoring"""
@@ -1443,6 +1475,53 @@ class NIAAttendanceMonitor:
             
         except Exception as e:
             console.print(f"│ [red]⚠️  Save error: {e}[/red]")
+
+    def reauthenticate_and_restart_monitor(self, employee_id, password, on_attendance_update, verbose=False):
+        """Full re-authentication and monitor restart"""
+        console.print("│ [yellow]🔄 RE-AUTH: Starting full re-authentication process...[/yellow]")
+        
+        # Disconnect existing monitor
+        if hasattr(self, 'signalr_monitor') and self.signalr_monitor:
+            self.signalr_monitor.disconnect()
+        
+        # Clear session to ensure fresh login
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'X-Requested-With': 'XMLHttpRequest'
+        })
+        
+        # Perform fresh login
+        console.print("│ [blue]🔐 RE-AUTH: Performing fresh login...[/blue]")
+        if not self.login(employee_id, password):
+            console.print("│ [red]🚨 RE-AUTH: Login failed![/red]")
+            return False
+        
+        # Get new connection token
+        console.print("│ [blue]🔧 RE-AUTH: Acquiring new connection token...[/blue]")
+        connection_token = self.get_signalr_connection_token()
+        
+        if not connection_token:
+            console.print("│ [red]🚨 RE-AUTH: Failed to get new connection token[/red]")
+            return False
+        
+        # Create new SignalR monitor with fresh session
+        cookies_dict = {c.name: c.value for c in self.session.cookies}
+        self.signalr_monitor = NIASignalRMonitor(self.base_url, cookies_dict, verbose=verbose)
+        self.signalr_monitor.add_callback(on_attendance_update)
+        
+        # Store credentials for future re-authentication
+        self.signalr_monitor.employee_id = employee_id
+        self.signalr_monitor.password = password
+        
+        console.print("│ [blue]🌐 RE-AUTH: Establishing new real-time connection...[/blue]")
+        
+        if self.signalr_monitor.connect(connection_token):
+            console.print("│ [green]✅ RE-AUTH: Successfully reconnected with fresh session![/green]")
+            return True
+        else:
+            console.print("│ [red]🚨 RE-AUTH: Failed to establish new connection[/red]")
+            return False
 
 def handle_signalr_attendance_update(attendance_data):
     """Enhanced callback that handles both data and refresh signals"""
