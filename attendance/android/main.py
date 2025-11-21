@@ -25,6 +25,105 @@ from rich import box
 from typing import List, Optional, Dict, Any
 import yaml
 from dataclasses import dataclass
+import platform
+import os
+
+class SoundNotifier:
+    def __init__(self, enabled=True):
+        self.system = platform.system()
+        self.enabled = enabled
+        self.initialized = False
+        
+    def initialize(self):
+        """Initialize sound system"""
+        if not self.enabled:
+            return
+            
+        try:
+            # Test if sound works
+            if self.system == "Windows":
+                import winsound
+                winsound.Beep(1000, 100)  # Quick test beep
+            elif self.system == "Darwin":  # macOS
+                os.system('afplay /System/Library/Sounds/Ping.aiff 2>/dev/null &')
+            else:  # Linux
+                os.system('echo -e "\a"')  # Terminal bell
+                
+            self.initialized = True
+            console.print("│ [green]🔊 Sound notifications: ENABLED[/green]")
+            
+        except Exception as e:
+            console.print(f"│ [yellow]⚠️  Sound system unavailable: {e}[/yellow]")
+            self.enabled = False
+    
+    def play_sound(self, sound_type="attendance"):
+        """Play different sounds for different events"""
+        if not self.enabled or not self.initialized:
+            return
+            
+        try:
+            if self.system == "Windows":
+                self._windows_sound(sound_type)
+            elif self.system == "Darwin":  # macOS
+                self._macos_sound(sound_type)
+            else:  # Linux and other Unix-like systems
+                self._linux_sound(sound_type)
+        except Exception as e:
+            # Silent fail - don't spam errors for sound issues
+            pass
+    
+    def _windows_sound(self, sound_type):
+        """Windows sound notifications"""
+        import winsound
+        if sound_type == "attendance":
+            winsound.Beep(1000, 300)  # High beep for attendance
+        elif sound_type == "success":
+            winsound.Beep(800, 200)   # Medium beep for success
+        elif sound_type == "error":
+            winsound.Beep(400, 500)   # Low beep for error
+        elif sound_type == "reconnect":
+            winsound.Beep(600, 150)   # Short beep for reconnect
+        elif sound_type == "startup":
+            winsound.Beep(800, 100)   # Quick startup beep
+    
+    def _macos_sound(self, sound_type):
+        """macOS sound notifications"""
+        if sound_type == "attendance":
+            os.system('afplay /System/Library/Sounds/Ping.aiff 2>/dev/null &')
+        elif sound_type == "success":
+            os.system('afplay /System/Library/Sounds/Glass.aiff 2>/dev/null &')
+        elif sound_type == "error":
+            os.system('afplay /System/Library/Sounds/Basso.aiff 2>/dev/null &')
+        elif sound_type == "reconnect":
+            os.system('afplay /System/Library/Sounds/Pop.aiff 2>/dev/null &')
+        elif sound_type == "startup":
+            os.system('afplay /System/Library/Sounds/Pop.aiff 2>/dev/null &')
+    
+    def _linux_sound(self, sound_type):
+        """Linux sound notifications"""
+        try:
+            # Try using speaker-test (usually available)
+            if sound_type == "attendance":
+                os.system('speaker-test -t sine -f 1000 -l 1 > /dev/null 2>&1 &')
+            elif sound_type == "success":
+                os.system('speaker-test -t sine -f 800 -l 1 > /dev/null 2>&1 &')
+            elif sound_type == "error":
+                os.system('speaker-test -t sine -f 400 -l 1 > /dev/null 2>&1 &')
+            elif sound_type == "reconnect":
+                os.system('speaker-test -t sine -f 600 -l 1 > /dev/null 2>&1 &')
+            elif sound_type == "startup":
+                os.system('speaker-test -t sine -f 590 -l 1 > /dev/null 2>&1 &')
+        except:
+            # Fallback to terminal bell
+            if sound_type == "attendance":
+                print('\a')  # Single bell
+            elif sound_type == "error":
+                print('\a\a')  # Double bell for error
+            else:
+                print('\a')  # Single bell for others
+
+# Global sound notifier instance
+sound_notifier = SoundNotifier()
 
 console = Console()
 
@@ -222,6 +321,9 @@ class NIASignalRMonitor:
         self.last_message_time = time.time()
         self._send_join_message()
         self._start_keep_alive()
+
+        # Play success sound on connection
+        sound_notifier.play_sound("success")
     
     def _schedule_reconnect(self, employee_id=None, password=None, full_reauth=False):
         """Enhanced reconnection with optional full re-authentication"""
@@ -1600,40 +1702,56 @@ class NIAAttendanceMonitor:
             return False
 
 def handle_signalr_attendance_update(attendance_data, monitor=None, employee_id=None, password=None):
-    """Enhanced callback that handles re-authentication requests"""
+    """Enhanced callback with sound notifications"""
     
     if isinstance(attendance_data, dict):
         # Handle re-authentication requests
         if attendance_data.get('type') == 'reauth_required':
             console.print()
-            console.print("═" * 70)
+            console.print("═" * 59)
             console.print(Align.center("🔄 RE-AUTHENTICATION REQUESTED"))
-            console.print("─" * 70)
+            console.print("─" * 59)
             console.print(f"│ [yellow]⚠️  Connection issues detected, re-authenticating...[/yellow]")
+            
+            # Play reconnect sound
+            sound_notifier.play_sound("reconnect")
             
             if monitor and employee_id and password:
                 success = monitor.reauthenticate_and_restart_monitor(employee_id, password, handle_signalr_attendance_update)
                 if success:
                     console.print(f"│ [green]✅ Re-authentication successful![/green]")
+                    sound_notifier.play_sound("success")
                 else:
                     console.print(f"│ [red]❌ Re-authentication failed[/red]")
+                    sound_notifier.play_sound("error")
             else:
                 console.print(f"│ [red]❌ Cannot re-authenticate: missing credentials[/red]")
+                sound_notifier.play_sound("error")
             
-            console.print("─" * 70)
+            console.print("─" * 59)
             return
         
-        # Handle refresh signals (existing functionality)
+        # Handle refresh signals (attendance updates)
         elif attendance_data.get('type') == 'refresh_signal':
             console.print()
-            console.print("═" * 70)
+            console.print("═" * 59)
             console.print(Align.center("🔄 BIOHUB REFRESH SIGNAL"))
-            console.print("─" * 70)
+            console.print("─" * 59)
             console.print(f"│ [bright_green]🎯 ATTENDANCE: New scan detected![/bright_green]")
             console.print(f"│ [dim]📡 Signal received at: {datetime.now().strftime('%H:%M:%S')}[/dim]")
             console.print("│ [yellow]💡 The system should refresh automatically...[/yellow]")
-            console.print("─" * 70)
+            
+            # Play attendance sound
+            sound_notifier.play_sound("attendance")
+            
+            console.print("─" * 59)
             return
+    
+    # Handle actual attendance data with sound
+    console.print()
+    console.print("═" * 59)
+    console.print(Align.center("⚡ REAL-TIME BIOMETRIC UPDATE"))
+    console.print("─" * 59)
     
     if isinstance(attendance_data, dict):
         employee_name = attendance_data.get('Name', 'UNKNOWN_USER')
@@ -1642,6 +1760,12 @@ def handle_signalr_attendance_update(attendance_data, monitor=None, employee_id=
         status = "ACCESS_GRANTED" if attendance_data.get('AccessResult') == 1 else "ACCESS_DENIED"
         
         date_time = AttendanceRecord.parse_net_date(date_time_str)
+        
+        # Play sound based on access result
+        if status == "ACCESS_GRANTED":
+            sound_notifier.play_sound("attendance")
+        else:
+            sound_notifier.play_sound("error")
         
         update_panel = Panel(
             Align.left(
@@ -1672,6 +1796,13 @@ def main():
     console.print(Align.center("│               [red]SECURE BIOMETRIC SURVEILLANCE[/red]            │"))
     console.print(Align.center("└─────────────────────────────────────────────────────┘"))
     console.print()
+
+    # Initialize sound system
+    global sound_notifier
+    sound_notifier.initialize()
+    
+    # Play startup sound
+    sound_notifier.play_sound("startup")
     
     config = Config().load()
     
