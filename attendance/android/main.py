@@ -1157,7 +1157,7 @@ class NIAAttendanceMonitor:
                         console.print("│ [blue]🔍 Connection Status:[/blue]")
                         if signalr_monitor:
                             status = "✅ Connected" if signalr_monitor.is_connected else "❌ Disconnected"
-                            console.print(f"│   SignalR: {status}")
+                            # console.print(f"│   SignalR: {status}")
                         else:
                             console.print("│   SignalR: ❌ Not available")
                         console.print("│   API: ✅ Active")
