@@ -920,7 +920,13 @@ class NIAAttendanceMonitor:
         if connection_token:
             cookies_dict = {c.name: c.value for c in self.session.cookies}
             signalr_monitor = NIASignalRMonitor(self.base_url, cookies_dict, verbose=verbose)
-            signalr_monitor.add_callback(enhanced_attendance_update)
+            # In your start_signalr_monitor method, update the callback setup:
+            signalr_monitor.add_callback(lambda data: handle_signalr_attendance_update(
+                data, 
+                monitor=self,  # Pass monitor instance for re-authentication
+                employee_id=employee_id, 
+                password=password
+            ))
             
             if signalr_monitor.connect(connection_token):
                 console.print("│ [green]✅ SIGNALR: Real-time feed active[/green]")
@@ -1036,7 +1042,13 @@ class NIAAttendanceMonitor:
         if connection_token:
             cookies_dict = {c.name: c.value for c in self.session.cookies}
             signalr_monitor = NIASignalRMonitor(self.base_url, cookies_dict, verbose=verbose)
-            signalr_monitor.add_callback(animated_attendance_update)
+            # In your start_signalr_monitor method, update the callback setup:
+            signalr_monitor.add_callback(lambda data: handle_signalr_attendance_update(
+                data, 
+                monitor=self,  # Pass monitor instance for re-authentication
+                employee_id=employee_id, 
+                password=password
+            ))
             signalr_monitor.connect(connection_token)
         
         console.print("│ [green]🚀 LIVE DISPLAY: Active[/green]")
@@ -1111,7 +1123,13 @@ class NIAAttendanceMonitor:
         if connection_token:
             cookies_dict = {c.name: c.value for c in self.session.cookies}
             signalr_monitor = NIASignalRMonitor(self.base_url, cookies_dict, verbose=verbose)
-            signalr_monitor.add_callback(handle_live_event)
+            # In your start_signalr_monitor method, update the callback setup:
+            signalr_monitor.add_callback(lambda data: handle_signalr_attendance_update(
+                data, 
+                monitor=self,  # Pass monitor instance for re-authentication
+                employee_id=employee_id, 
+                password=password
+            ))
             
             if signalr_monitor.connect(connection_token):
                 console.print("│ [green]✅ LIVE STREAM: Started[/green]")
@@ -1166,7 +1184,13 @@ class NIAAttendanceMonitor:
         if connection_token:
             cookies_dict = {c.name: c.value for c in self.session.cookies}
             signalr_monitor = NIASignalRMonitor(self.base_url, cookies_dict, verbose=verbose)
-            signalr_monitor.add_callback(on_attendance_update)
+            # In your start_signalr_monitor method, update the callback setup:
+            signalr_monitor.add_callback(lambda data: handle_signalr_attendance_update(
+                data, 
+                monitor=self,  # Pass monitor instance for re-authentication
+                employee_id=employee_id, 
+                password=password
+            ))
             signalr_monitor.connect(connection_token)
         
         console.print("│ [cyan]💡 Commands: R=Refresh C=Status L=Test Q=Quit[/cyan]")
@@ -1508,7 +1532,13 @@ class NIAAttendanceMonitor:
         # Create new SignalR monitor with fresh session
         cookies_dict = {c.name: c.value for c in self.session.cookies}
         self.signalr_monitor = NIASignalRMonitor(self.base_url, cookies_dict, verbose=verbose)
-        self.signalr_monitor.add_callback(on_attendance_update)
+        # In your start_signalr_monitor method, update the callback setup:
+        self.signalr_monitor.add_callback(lambda data: handle_signalr_attendance_update(
+            data, 
+            monitor=self,  # Pass monitor instance for re-authentication
+            employee_id=employee_id, 
+            password=password
+        ))
         
         # Store credentials for future re-authentication
         self.signalr_monitor.employee_id = employee_id
@@ -1523,26 +1553,41 @@ class NIAAttendanceMonitor:
             console.print("│ [red]🚨 RE-AUTH: Failed to establish new connection[/red]")
             return False
 
-def handle_signalr_attendance_update(attendance_data):
-    """Enhanced callback that handles both data and refresh signals"""
+def handle_signalr_attendance_update(attendance_data, monitor=None, employee_id=None, password=None):
+    """Enhanced callback that handles re-authentication requests"""
     
-    if isinstance(attendance_data, dict) and attendance_data.get('type') == 'refresh_signal':
-        # This is a refresh signal from BioHub
-        console.print()
-        console.print("═" * 59)
-        console.print(Align.center("🔄 BIOHUB REFRESH SIGNAL"))
-        console.print("─" * 59)
-        console.print(f"│ [bright_green]🎯 ATTENDANCE: New scan detected![/bright_green]")
-        console.print(f"│ [dim]📡 Signal received at: {datetime.now().strftime('%H:%M:%S')}[/dim]")
-        console.print("│ [yellow]💡 The system should refresh automatically...[/yellow]")
-        console.print("─" * 59)
-        return
-    
-    # Original handling for actual attendance data
-    console.print()
-    console.print("═" * 59)
-    console.print(Align.center("⚡ REAL-TIME BIOMETRIC UPDATE"))
-    console.print("─" * 59)
+    if isinstance(attendance_data, dict):
+        # Handle re-authentication requests
+        if attendance_data.get('type') == 'reauth_required':
+            console.print()
+            console.print("═" * 70)
+            console.print(Align.center("🔄 RE-AUTHENTICATION REQUESTED"))
+            console.print("─" * 70)
+            console.print(f"│ [yellow]⚠️  Connection issues detected, re-authenticating...[/yellow]")
+            
+            if monitor and employee_id and password:
+                success = monitor.reauthenticate_and_restart_monitor(employee_id, password, handle_signalr_attendance_update)
+                if success:
+                    console.print(f"│ [green]✅ Re-authentication successful![/green]")
+                else:
+                    console.print(f"│ [red]❌ Re-authentication failed[/red]")
+            else:
+                console.print(f"│ [red]❌ Cannot re-authenticate: missing credentials[/red]")
+            
+            console.print("─" * 70)
+            return
+        
+        # Handle refresh signals (existing functionality)
+        elif attendance_data.get('type') == 'refresh_signal':
+            console.print()
+            console.print("═" * 70)
+            console.print(Align.center("🔄 BIOHUB REFRESH SIGNAL"))
+            console.print("─" * 70)
+            console.print(f"│ [bright_green]🎯 ATTENDANCE: New scan detected![/bright_green]")
+            console.print(f"│ [dim]📡 Signal received at: {datetime.now().strftime('%H:%M:%S')}[/dim]")
+            console.print("│ [yellow]💡 The system should refresh automatically...[/yellow]")
+            console.print("─" * 70)
+            return
     
     if isinstance(attendance_data, dict):
         employee_name = attendance_data.get('Name', 'UNKNOWN_USER')
@@ -1572,6 +1617,7 @@ def handle_signalr_attendance_update(attendance_data):
     console.print(f"│ [dim]📡 SIGNAL: {datetime.now().strftime('%H:%M:%S')}[/dim]")
     console.print("│ [dim]🔍 SYSTEM: Continuing surveillance...[/dim]")
     console.print("─" * 59)
+
 def main():
     # Show startup banner
     console.print("\n")
