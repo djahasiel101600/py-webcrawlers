@@ -17,7 +17,7 @@ from typing import List, Dict, Any
 from config import Config
 from attendanceRecord import AttendanceRecord
 from niaSignalRMonitor import NIASignalRMonitor
-from methods import handle_signalr_attendance_update
+from methods import handle_signalr_attendance_update, send_telegram_message
 
 console = Console()
 
@@ -843,6 +843,7 @@ class NIAAttendanceMonitor:
                         break
                     elif user_input == 'r':
                         console.print("│ [yellow]🔄 Refreshing data...[/yellow]")
+                        send_telegram_message("Data Refresh Triggered")
                         refresh_display()
                         console.print("│ [cyan]💡 Commands: R=Refresh C=Status L=Test Q=Quit[/cyan]")
                         console.print("─" * 59)
