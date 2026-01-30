@@ -6,6 +6,7 @@ from rich.text import Text
 import requests
 from soundNotifier import SoundNotifier
 from attendanceRecord import AttendanceRecord
+from methods import send_telegram_message
 
 
 console = Console()
