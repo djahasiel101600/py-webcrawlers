@@ -156,7 +156,7 @@ def main():
         choice = Prompt.ask(
             "\n[bright_white]SELECT OPERATION[/bright_white]", 
             choices=["1", "2", "3", "4", "5", "6"], 
-            default="3"
+            default="2"
         )
     
     if choice == "1":
